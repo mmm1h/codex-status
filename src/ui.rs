@@ -12,10 +12,10 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap,
     CreateCompatibleDC, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET,
-    DEFAULT_PITCH, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
-    DeleteDC, DeleteObject, DrawTextW, EndPaint, FF_SWISS, FONT_QUALITY, FW_NORMAL, FW_SEMIBOLD,
-    FillRect, FillRgn, GetTextExtentPoint32W, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-    SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    DEFAULT_PITCH, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint, FF_SWISS, FONT_QUALITY, FW_NORMAL,
+    FW_SEMIBOLD, FillRect, FillRgn, GetTextExtentPoint32W, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS,
+    PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -481,7 +481,7 @@ unsafe fn draw_card(
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.account.plan_type.as_deref())
-            .map(plan_label)
+            .map(|plan| plan_label(plan, locale))
             .unwrap_or("--")
             .to_owned();
         let credits = state
@@ -552,30 +552,53 @@ unsafe fn draw_card(
             );
         }
 
-        let footer = footer_text(state, locale, decorations.service_health);
-        draw_text(
-            hdc,
-            locale,
-            &footer,
-            RECT {
-                left: scale(18, dpi),
-                top: scale(258, dpi),
-                right: width - scale(18, dpi),
-                bottom: height - scale(7, dpi),
-            },
-            scale(11, dpi),
-            FW_NORMAL.0 as i32,
-            if state.error.is_some() {
-                status_color
-            } else {
-                match decorations.service_health {
-                    ServiceHealth::Degraded if !theme.high_contrast => rgb(184, 112, 0),
-                    ServiceHealth::Outage if !theme.high_contrast => rgb(211, 64, 73),
-                    ServiceHealth::Degraded | ServiceHealth::Outage => theme.text,
-                    _ => theme.muted,
-                }
-            },
-        );
+        let footer_rect = RECT {
+            left: scale(18, dpi),
+            top: scale(258, dpi),
+            right: width - scale(18, dpi),
+            bottom: height - scale(7, dpi),
+        };
+        let projection = if state.error.is_none()
+            && !matches!(
+                decorations.service_health,
+                ServiceHealth::Degraded | ServiceHealth::Outage
+            ) {
+            weekly_usage_projection(state, Local::now().timestamp())
+                .map(|projection| projection_label(projection, locale))
+        } else {
+            None
+        };
+        if let Some(projection) = projection {
+            draw_text_center(
+                hdc,
+                locale,
+                &projection.text,
+                footer_rect,
+                scale(11, dpi),
+                FW_SEMIBOLD.0 as i32,
+                projection_color(projection.ample, theme.high_contrast),
+            );
+        } else {
+            let footer = footer_text(state, locale, decorations.service_health);
+            draw_text(
+                hdc,
+                locale,
+                &footer,
+                footer_rect,
+                scale(11, dpi),
+                FW_NORMAL.0 as i32,
+                if state.error.is_some() {
+                    status_color
+                } else {
+                    match decorations.service_health {
+                        ServiceHealth::Degraded if !theme.high_contrast => rgb(184, 112, 0),
+                        ServiceHealth::Outage if !theme.high_contrast => rgb(211, 64, 73),
+                        ServiceHealth::Degraded | ServiceHealth::Outage => theme.text,
+                        _ => theme.muted,
+                    }
+                },
+            );
+        }
     }
 }
 
@@ -821,6 +844,77 @@ fn footer_text(state: &DisplayState, locale: Locale, service_health: ServiceHeal
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageProjection {
+    Ample,
+    Exhausted,
+    DepletesIn { seconds: i64 },
+}
+
+fn weekly_usage_projection(state: &DisplayState, now: i64) -> Option<UsageProjection> {
+    let snapshot = state.snapshot.as_ref()?;
+    let window = snapshot.weekly.as_ref()?;
+    let insight = analyze_window(window, snapshot.fetched_at);
+    let used_percent = insight.used_percent?;
+    if used_percent >= 100.0 {
+        return Some(UsageProjection::Exhausted);
+    }
+
+    let reset_at = insight.reset_at?;
+    if reset_at <= now {
+        return None;
+    }
+    if used_percent <= f64::EPSILON {
+        return Some(UsageProjection::Ample);
+    }
+
+    let projected_at = insight.projected_exhaustion_at?;
+    if projected_at >= reset_at {
+        return Some(UsageProjection::Ample);
+    }
+    Some(UsageProjection::DepletesIn { seconds: projected_at.saturating_sub(now).max(0) })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectionLabel {
+    text: String,
+    ample: bool,
+}
+
+fn projection_label(projection: UsageProjection, locale: Locale) -> ProjectionLabel {
+    match projection {
+        UsageProjection::Ample => ProjectionLabel {
+            text: locale.text("Usage ample", "用量充裕").to_owned(),
+            ample: true,
+        },
+        UsageProjection::Exhausted => ProjectionLabel {
+            text: locale.text("Quota exhausted", "额度耗尽").to_owned(),
+            ample: false,
+        },
+        UsageProjection::DepletesIn { seconds } => {
+            let total_hours = if seconds <= 0 { 0 } else { seconds.saturating_add(3_599) / 3_600 };
+            let days = total_hours / 24;
+            let hours = total_hours % 24;
+            let text = if locale == Locale::Chinese {
+                format!("{days}天{hours}小时后 耗尽")
+            } else {
+                format!("{days}d {hours}h until exhausted")
+            };
+            ProjectionLabel { text, ample: false }
+        }
+    }
+}
+
+fn projection_color(ample: bool, high_contrast: bool) -> COLORREF {
+    if high_contrast {
+        rgb(255, 255, 255)
+    } else if ample {
+        rgb(16, 163, 127)
+    } else {
+        rgb(211, 64, 73)
+    }
+}
+
 fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
     let Some(reset) = window.resets_at else {
         return (
@@ -850,10 +944,13 @@ fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
     (countdown, local_time)
 }
 
-pub(crate) fn plan_label(plan: &str) -> &str {
+pub(crate) fn plan_label(plan: &str, locale: Locale) -> &str {
     match plan.to_ascii_lowercase().as_str() {
+        "free" => locale.text("Free", "免费"),
+        "go" => "Go",
         "plus" => "Plus",
-        "pro" => "Pro",
+        "prolite" => "5x Pro",
+        "pro" => "20x Pro",
         "team" => "Team",
         "business" => "Business",
         "enterprise" => "Enterprise",
@@ -900,6 +997,19 @@ unsafe fn draw_text_right(
 ) {
     let style = TextStyle { height, weight, color };
     unsafe { draw_text_with_alignment(hdc, locale, value, rect, style, DT_RIGHT) }
+}
+
+unsafe fn draw_text_center(
+    hdc: HDC,
+    locale: Locale,
+    value: &str,
+    rect: RECT,
+    height: i32,
+    weight: i32,
+    color: COLORREF,
+) {
+    let style = TextStyle { height, weight, color };
+    unsafe { draw_text_with_alignment(hdc, locale, value, rect, style, DT_CENTER) }
 }
 
 #[derive(Clone, Copy)]
@@ -979,10 +1089,7 @@ unsafe fn create_ui_font(
 }
 
 const fn ui_font_face(_locale: Locale) -> &'static str {
-    // Request one Windows UI family for every run. Windows font linking
-    // supplies CJK glyphs without switching the Latin letters and numbers to a
-    // different face for each individual string.
-    "Segoe UI Variable Text"
+    "Microsoft YaHei UI"
 }
 
 unsafe fn fill(hdc: HDC, rect: RECT, color: COLORREF) {
@@ -1050,6 +1157,71 @@ mod tests {
     #[test]
     fn uses_one_ui_font_family_in_every_locale() {
         assert_eq!(ui_font_face(Locale::Chinese), ui_font_face(Locale::English));
+        assert_eq!(ui_font_face(Locale::Chinese), "Microsoft YaHei UI");
+    }
+
+    #[test]
+    fn labels_supported_personal_plans() {
+        assert_eq!(plan_label("free", Locale::Chinese), "免费");
+        assert_eq!(plan_label("free", Locale::English), "Free");
+        assert_eq!(plan_label("go", Locale::Chinese), "Go");
+        assert_eq!(plan_label("plus", Locale::Chinese), "Plus");
+        assert_eq!(plan_label("prolite", Locale::Chinese), "5x Pro");
+        assert_eq!(plan_label("pro", Locale::Chinese), "20x Pro");
+    }
+
+    fn weekly_state(used_percent: f64, fetched_at: i64, resets_at: Option<i64>) -> DisplayState {
+        DisplayState::live(QuotaSnapshot {
+            weekly: Some(QuotaWindow {
+                used_percent,
+                remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
+                window_minutes: 10_080,
+                resets_at,
+            }),
+            session: None,
+            account: AccountSummary::default(),
+            fetched_at,
+        })
+    }
+
+    #[test]
+    fn projects_from_the_snapshot_observation_time() {
+        let reset_at = 10_080 * 60;
+        let fetched_at = 24 * 60 * 60;
+        assert_eq!(
+            weekly_usage_projection(&weekly_state(10.0, fetched_at, Some(reset_at)), fetched_at),
+            Some(UsageProjection::Ample)
+        );
+        assert_eq!(
+            weekly_usage_projection(
+                &weekly_state(50.0, fetched_at, Some(reset_at)),
+                fetched_at + 60 * 60
+            ),
+            Some(UsageProjection::DepletesIn { seconds: 23 * 60 * 60 })
+        );
+        assert_eq!(
+            weekly_usage_projection(&weekly_state(100.0, fetched_at, None), fetched_at),
+            Some(UsageProjection::Exhausted)
+        );
+    }
+
+    #[test]
+    fn localizes_projection_labels() {
+        assert_eq!(
+            projection_label(UsageProjection::Ample, Locale::Chinese),
+            ProjectionLabel { text: "用量充裕".to_owned(), ample: true }
+        );
+        assert_eq!(
+            projection_label(
+                UsageProjection::DepletesIn { seconds: 25 * 60 * 60 },
+                Locale::Chinese,
+            ),
+            ProjectionLabel { text: "1天1小时后 耗尽".to_owned(), ample: false }
+        );
+        assert_eq!(
+            projection_label(UsageProjection::Exhausted, Locale::Chinese),
+            ProjectionLabel { text: "额度耗尽".to_owned(), ample: false }
+        );
     }
 
     #[test]

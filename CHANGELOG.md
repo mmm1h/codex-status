@@ -2,6 +2,12 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [Unreleased]
+
+- Prefer the quota bucket's plan identity and distinguish Free, Go, Plus, 5x Pro, and 20x Pro accounts.
+- Show a centered weekly depletion forecast with explicit ample and exhausted states.
+- Use Microsoft YaHei UI consistently throughout the flyout.
+
 ## [0.3.0] - 2026-07-27
 
 - Add independent weekly and five-hour low-quota thresholds, smart pace warnings, recovery alerts, and a test-notification action.

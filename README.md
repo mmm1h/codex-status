@@ -25,6 +25,7 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 - Event-driven Win32 process with no Electron, WebView, WPF, WinUI, local HTTP server, or resident async runtime.
 - Five-minute default refresh, manual refresh, bounded failure backoff, safe cache expiry, and optional low-quota alerts.
 - Weekly and five-hour alert thresholds, projected-exhaustion warnings, recovery alerts, and a built-in notification test.
+- Free, Go, Plus, 5x Pro, and 20x Pro plan labels, plus a centered weekly depletion forecast.
 - Weekly, five-hour, or lowest-of-both tray display; the details card hides unavailable windows instead of inventing values.
 - Optional official OpenAI status checks, copyable status/diagnostics, a pinnable card, and a `Ctrl+Alt+Q` shortcut.
 - Quota and service checks pause while Windows is locked or asleep and resume with one fresh read.
@@ -47,6 +48,7 @@ The installer is not yet code-signed, so Microsoft Defender SmartScreen may show
 - **Right-click:** refresh, choose the tray metric, configure weekly/five-hour/pace/recovery alerts, select a theme, pin the card, copy status or diagnostics, check OpenAI status, toggle `Ctrl+Alt+Q`, manage startup, or exit.
 - **Tray label:** weekly remaining by default; optionally the five-hour value or the lower of both, rounded to the nearest whole number.
 - **Quota bar marker:** compares quota remaining with time remaining in the current weekly cycle and flags a pace that projects exhaustion before reset.
+- **Forecast footer:** shows a green ample-use state, a red estimated time to depletion, or an explicit exhausted state.
 
 CodexStatus only calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read`, then closes the process tree using a Windows Job Object. It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota.
 

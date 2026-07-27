@@ -1661,7 +1661,7 @@ impl AppState {
                 lines.push(format!(
                     "{}: {}",
                     self.locale.text("Plan", "套餐"),
-                    ui::plan_label(plan)
+                    ui::plan_label(plan, self.locale)
                 ));
             }
             lines.push(format!(
