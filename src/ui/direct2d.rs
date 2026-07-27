@@ -883,16 +883,16 @@ fn draw_header_content(
     refreshing: bool,
 ) -> Result<()> {
     let button_brush = solid_brush(target, refresh_button_fill(theme, button_state))?;
-    let button = rounded_rect(371.0, 16.0, 407.0, 52.0, 4.0);
+    let button = rounded_rect(368.0, 14.0, 404.0, 50.0, 4.0);
     unsafe {
-        target.FillEllipse(&ellipse(24.0, 30.0, 4.0), &brushes.accent);
-        draw_text(target, "Codex", rect(39.0, 8.0, 102.0, 52.0), &formats.header, &brushes.text);
+        target.FillEllipse(&ellipse(24.0, 32.0, 4.0), &brushes.accent);
+        draw_text(target, "Codex", rect(39.0, 10.0, 102.0, 54.0), &formats.header, &brushes.text);
         draw_tabular_text(
             target,
             dwrite,
             formats,
             &updated_text(state),
-            rect(108.0, 9.0, 245.0, 51.0),
+            rect(108.0, 11.0, 245.0, 53.0),
             &formats.update,
             &brushes.muted,
         )?;
@@ -906,9 +906,9 @@ fn draw_header_content(
             &brushes.muted
         };
         if refreshing {
-            draw_spinner(target, 389.0, 34.0, 8.0, icon_brush, 1.8);
+            draw_spinner(target, 386.0, 32.0, 8.0, icon_brush, 1.8);
         } else {
-            draw_ring_arrow(target, 389.0, 34.0, 7.4, icon_brush, 1.7)?;
+            draw_ring_arrow(target, 386.0, 32.0, 7.4, icon_brush, 1.7)?;
         }
     }
     Ok(())
@@ -1140,7 +1140,7 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(16.0, 315.0, 151.0, 385.0),
+            rect(16.0, 315.0, 145.0, 385.0),
             locale.text("Plan", "套餐"),
             &plan,
         )?;
@@ -1149,7 +1149,7 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(151.0, 315.0, 282.0, 385.0),
+            rect(145.0, 315.0, 274.0, 385.0),
             locale.text("Session quota", "会话额度"),
             &session,
         )?;
@@ -1158,7 +1158,7 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(282.0, 315.0, 404.0, 385.0),
+            rect(274.0, 315.0, 404.0, 385.0),
             locale.text("Reset credits", "重置机会"),
             &credits,
         )?;
@@ -1168,7 +1168,7 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(16.0, 315.0, 220.0, 385.0),
+            rect(16.0, 315.0, 210.0, 385.0),
             locale.text("Plan", "套餐"),
             &plan,
         )?;
@@ -1177,7 +1177,7 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(220.0, 315.0, 404.0, 385.0),
+            rect(210.0, 315.0, 404.0, 385.0),
             locale.text("Reset credits", "重置机会"),
             &credits,
         )?;
@@ -1198,7 +1198,7 @@ fn draw_metric(
         draw_text(
             target,
             label,
-            rect(area.left + 16.0, area.top + 5.0, area.right - 8.0, area.top + 34.0),
+            rect(area.left + 16.0, area.top + 5.0, area.right - 16.0, area.top + 34.0),
             &formats.metric_label,
             &brushes.muted,
         );
@@ -1207,7 +1207,7 @@ fn draw_metric(
             dwrite,
             formats,
             value,
-            rect(area.left + 16.0, area.top + 30.0, area.right - 8.0, area.bottom - 4.0),
+            rect(area.left + 16.0, area.top + 30.0, area.right - 16.0, area.bottom - 4.0),
             &formats.metric_value,
             &brushes.text,
         )?;
@@ -1227,7 +1227,7 @@ fn draw_footer_content(
         draw_text(
             target,
             &footer_text(state, locale),
-            rect(32.0, 390.0, 402.0, 429.0),
+            rect(32.0, 390.0, 388.0, 429.0),
             &formats.footer,
             footer_brush,
         );

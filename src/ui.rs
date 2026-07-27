@@ -313,9 +313,9 @@ unsafe fn draw_card(
             hdc,
             RECT {
                 left: scale(20, dpi),
-                top: scale(26, dpi),
+                top: scale(28, dpi),
                 right: scale(28, dpi),
-                bottom: scale(34, dpi),
+                bottom: scale(36, dpi),
             },
             scale(8, dpi),
             status_color,
@@ -326,9 +326,9 @@ unsafe fn draw_card(
             "Codex",
             RECT {
                 left: scale(39, dpi),
-                top: scale(9, dpi),
+                top: scale(10, dpi),
                 right: scale(102, dpi),
-                bottom: scale(52, dpi),
+                bottom: scale(54, dpi),
             },
             scale(14, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -341,9 +341,9 @@ unsafe fn draw_card(
             &updated_text(state),
             RECT {
                 left: scale(108, dpi),
-                top: scale(10, dpi),
+                top: scale(11, dpi),
                 right: scale(245, dpi),
-                bottom: scale(51, dpi),
+                bottom: scale(53, dpi),
             },
             scale(12, dpi),
             FW_NORMAL.0 as i32,
@@ -397,7 +397,7 @@ unsafe fn draw_card(
             RECT {
                 left: scale(32, dpi),
                 top: scale(235, dpi),
-                right: width - scale(34, dpi),
+                right: width - scale(32, dpi),
                 bottom: scale(264, dpi),
             },
             scale(12, dpi),
@@ -411,7 +411,7 @@ unsafe fn draw_card(
             RECT {
                 left: scale(32, dpi),
                 top: scale(258, dpi),
-                right: width - scale(34, dpi),
+                right: width - scale(32, dpi),
                 bottom: scale(291, dpi),
             },
             scale(20, dpi),
@@ -425,7 +425,7 @@ unsafe fn draw_card(
             RECT {
                 left: scale(32, dpi),
                 top: scale(286, dpi),
-                right: width - scale(34, dpi),
+                right: width - scale(32, dpi),
                 bottom: scale(312, dpi),
             },
             scale(12, dpi),
@@ -520,7 +520,7 @@ unsafe fn draw_card(
             metric_column(
                 hdc,
                 locale,
-                RECT { right: scale(151, dpi), ..metrics },
+                RECT { right: scale(145, dpi), ..metrics },
                 locale.text("Plan", "套餐"),
                 &plan,
                 theme,
@@ -529,7 +529,7 @@ unsafe fn draw_card(
             metric_column(
                 hdc,
                 locale,
-                RECT { left: scale(151, dpi), right: scale(282, dpi), ..metrics },
+                RECT { left: scale(145, dpi), right: scale(274, dpi), ..metrics },
                 locale.text("Session quota", "会话额度"),
                 &session,
                 theme,
@@ -538,7 +538,7 @@ unsafe fn draw_card(
             metric_column(
                 hdc,
                 locale,
-                RECT { left: scale(282, dpi), ..metrics },
+                RECT { left: scale(274, dpi), ..metrics },
                 locale.text("Reset credits", "重置机会"),
                 &credits,
                 theme,
@@ -548,7 +548,7 @@ unsafe fn draw_card(
             metric_column(
                 hdc,
                 locale,
-                RECT { right: scale(220, dpi), ..metrics },
+                RECT { right: scale(210, dpi), ..metrics },
                 locale.text("Plan", "套餐"),
                 &plan,
                 theme,
@@ -557,7 +557,7 @@ unsafe fn draw_card(
             metric_column(
                 hdc,
                 locale,
-                RECT { left: scale(220, dpi), ..metrics },
+                RECT { left: scale(210, dpi), ..metrics },
                 locale.text("Reset credits", "重置机会"),
                 &credits,
                 theme,
@@ -573,7 +573,7 @@ unsafe fn draw_card(
             RECT {
                 left: scale(32, dpi),
                 top: scale(390, dpi),
-                right: width - scale(18, dpi),
+                right: width - scale(32, dpi),
                 bottom: height,
             },
             scale(12, dpi),
@@ -590,10 +590,10 @@ pub fn refresh_hit_test(x: i32, y: i32, dpi: u32) -> bool {
 
 pub fn refresh_rect(dpi: u32) -> RECT {
     RECT {
-        left: scale(362, dpi),
-        top: scale(8, dpi),
-        right: scale(416, dpi),
-        bottom: scale(60, dpi),
+        left: scale(359, dpi),
+        top: scale(6, dpi),
+        right: scale(413, dpi),
+        bottom: scale(58, dpi),
     }
 }
 
@@ -606,10 +606,10 @@ unsafe fn draw_refresh_button(
 ) {
     unsafe {
         let rect = RECT {
-            left: scale(371, dpi),
-            top: scale(16, dpi),
-            right: scale(407, dpi),
-            bottom: scale(52, dpi),
+            left: scale(368, dpi),
+            top: scale(14, dpi),
+            right: scale(404, dpi),
+            bottom: scale(50, dpi),
         };
         let fill_color = refresh_button_fill(theme, state);
         if theme.high_contrast {
@@ -712,7 +712,7 @@ unsafe fn metric_column(
             RECT {
                 left: rect.left + scale(16, dpi),
                 top: rect.top + scale(5, dpi),
-                right: rect.right - scale(8, dpi),
+                right: rect.right - scale(16, dpi),
                 bottom: rect.top + scale(34, dpi),
             },
             scale(12, dpi),
@@ -726,7 +726,7 @@ unsafe fn metric_column(
             RECT {
                 left: rect.left + scale(16, dpi),
                 top: rect.top + scale(30, dpi),
-                right: rect.right - scale(8, dpi),
+                right: rect.right - scale(16, dpi),
                 bottom: rect.bottom - scale(4, dpi),
             },
             scale(20, dpi),
