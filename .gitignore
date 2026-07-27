@@ -1,6 +1,7 @@
 /target/
 /.tools/
 /dist/
+/tmp/
 *.pdb
 *.ilk
 *.log

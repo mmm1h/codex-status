@@ -18,7 +18,9 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 
 - Weekly remaining quota drawn directly into the standard tray icon.
 - Transparent, theme-aware Segoe UI digits with a restrained green (≥50%), amber (20–49%), red (<20%), or muted status rule.
-- Direct2D + DirectWrite rounded flyout with ClearType typography, restrained data visualization, and light, dark, high-contrast, and per-monitor DPI support.
+- D3D11 + Direct2D/DirectWrite flyout composed through a premultiplied DirectComposition swapchain, with live Windows acrylic, grayscale-antialiased text, and light, dark, high-contrast, and per-monitor DPI support.
+- Layered translucent glass cards with native Direct2D shadows and blur effects, whitespace-based grouping, vector refresh artwork, and locally scrimmed bare-glass text.
+- Free, Go, Plus, and Pro plan badges use CodexStatus's own shapes and tier dots—not official OpenAI artwork—and do not rely on color alone to communicate the tier.
 - System, light, and dark flyout themes selectable from the tray menu.
 - Silent daily updates from verified GitHub Release assets, followed by an automatic restart.
 - Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
@@ -50,6 +52,12 @@ The installer is not yet code-signed, so Microsoft Defender SmartScreen may show
 
 CodexStatus only calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read`, then closes the process tree using a Windows Job Object. It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota.
 
+### Rendering and fallback
+
+The flyout renders through D3D11, an `ID2D1DeviceContext`, and a premultiplied DirectComposition swapchain. Its live background blur uses Windows acrylic through `user32!SetWindowCompositionAttribute` with `ACCENT_ENABLE_ACRYLICBLURBEHIND`; the documented `DWMWA_SYSTEMBACKDROP_TYPE` path was not used because testing on this flyout produced a fixed solid color rather than live blur. Card shadows use `CLSID_D2D1Shadow`, while the large-number glow and progress-endpoint halo use `CLSID_D2D1GaussianBlur`. Text uses grayscale antialiasing because ClearType can create colored fringes on premultiplied-alpha surfaces.
+
+High-contrast mode, disabled Windows transparency effects, a Remote Desktop session, or failure to resolve or call `SetWindowCompositionAttribute` switches the flyout to opaque rendering without removing functionality. D3D11, Direct2D, or DirectComposition initialization or drawing failures also fall back to opaque rendering and, if necessary, continue through the original GDI drawing path.
+
 ## Privacy
 
 CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. Service checks read only the public `status.openai.com` summary, send no credentials, run at most every 15 minutes, and can be disabled from the tray menu. For automatic updates, it reads the public latest-release metadata from `api.github.com` at most once per day and downloads an executable only when a newer stable version exists. The file must match the SHA-256 digest published by GitHub before it can replace the current executable.
@@ -65,12 +73,14 @@ Normal builds do not write logs. The optional `diagnostics` Cargo feature record
 
 Measured on Windows 11 24H2 x64 with a 120.77-second local v0.4.0 x64 Release residency sample after closing the flyout:
 
+> These measurements were collected before the acrylic rendering redesign. Equivalent measurements for the new graphics architecture are still pending.
+
 | State | CodexStatus working set | CPU | Child processes |
 |---|---:|---:|---:|
 | Idle after the flyout closes | 3.56 MB average / 3.86 MB maximum | 0.0% observed | 0 |
 | Refreshing | <15 MB for the tray process | brief | 1 temporary `codex app-server` tree |
 
-The sample ended with two threads, fewer handles than it started, no change in GDI or USER object counts, and no child process. The Direct2D render target, brushes, and DirectWrite text formats are created only while the card is visible; those objects are released when it closes and the working set is trimmed shortly afterward. The app-server process has a larger transient footprint because it is Codex itself; it exits immediately after the two account calls complete and is not part of the resident tray process. If Direct2D initialization ever fails, the previous GDI renderer remains available as a fallback.
+The pre-redesign sample ended with two threads, fewer handles than it started, no change in GDI or USER object counts, and no child process. In the current architecture, the flyout keeps its graphics device resources for quick reopening and releases the complete graphics stack after more than three minutes of inactivity. The app-server process has a larger transient footprint because it is Codex itself; it exits immediately after the two account calls complete and is not part of the resident tray process.
 
 ## Build
 

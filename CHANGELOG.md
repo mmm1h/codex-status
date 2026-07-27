@@ -2,6 +2,16 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [Unreleased]
+
+- Move the flyout from `ID2D1HwndRenderTarget` to D3D11, an `ID2D1DeviceContext`, and a premultiplied DirectComposition swapchain, with grayscale-antialiased text on transparent surfaces.
+- Add live Windows acrylic through `SetWindowCompositionAttribute`, with opaque rendering used for high contrast, disabled transparency effects, Remote Desktop, composition API failures, and graphics initialization or drawing failures; retain GDI as the final fallback.
+- Replace simulated card shadows, large-number glow, and progress-endpoint halo with `CLSID_D2D1Shadow` and `CLSID_D2D1GaussianBlur` effects.
+- Refine the flyout with layered translucent glass cards, whitespace-based grouping, vector refresh artwork, a borderless refresh button, local text scrims, and updated spacing and type hierarchy.
+- Add CodexStatus-designed Free, Go, Plus, and Pro plan badges whose shapes and tier dots communicate level without relying on color alone; these are not official OpenAI assets.
+- Keep flyout graphics devices available for quick reopening, then release the complete graphics stack after more than three minutes of inactivity.
+- Extend the existing `windows` crate feature set for Direct3D 11, DXGI, and DirectComposition without adding a new third-party crate.
+
 ## [0.4.0] - 2026-07-27
 
 - Move the details flyout to a lazy Direct2D + DirectWrite renderer with ClearType text, DPI-aware geometry, and the existing GDI path retained as a safe fallback.

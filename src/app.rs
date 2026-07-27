@@ -30,8 +30,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
-    GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow,
+    GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::Ime::ImmDisableIME;
 use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_ESCAPE};
@@ -42,18 +42,18 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos,
-    GetMessageW, HMENU, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW, MF_CHECKED,
-    MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage,
-    RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
-    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
-    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_HOTKEY,
-    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_PAINT, WM_POWERBROADCAST,
-    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+    AppendMenuW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, HMENU,
+    IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW, MF_CHECKED, MF_DISABLED, MF_GRAYED,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassExW,
+    RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
+    WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK,
+    WM_LBUTTONUP, WM_NULL, WM_PAINT, WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_OVERLAPPED, WS_POPUP,
 };
 use windows::core::{GUID, PCWSTR, w};
 
@@ -77,11 +77,13 @@ const TIMER_FLYOUT_ACTIVATE: usize = 4;
 const TIMER_UPDATE: usize = 5;
 const TIMER_WORKING_SET_TRIM: usize = 6;
 const TIMER_STATUS: usize = 7;
+const TIMER_RENDERER_RELEASE: usize = 8;
 
 const UPDATE_INITIAL_DELAY_MS: u32 = 90_000;
 const UPDATE_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 const UPDATE_RETRY_MS: u32 = 6 * 60 * 60 * 1_000;
 const UPDATE_WORKING_SET_TRIM_MS: u32 = 5_000;
+const RENDERER_IDLE_RELEASE_MS: u32 = 3 * 60 * 1_000;
 const STATUS_INITIAL_DELAY_MS: u32 = 15_000;
 const STATUS_INTERVAL_MS: u32 = 15 * 60 * 1_000;
 const STATUS_RETRY_MS: u32 = 30 * 60 * 1_000;
@@ -404,7 +406,7 @@ fn register_classes(instance: HINSTANCE) -> windows::core::Result<()> {
         }
         let flyout = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
-            style: CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW,
+            style: CS_HREDRAW | CS_VREDRAW,
             hInstance: instance,
             lpszClassName: FLYOUT_CLASS,
             lpfnWndProc: Some(flyout_window_proc),
@@ -503,6 +505,13 @@ unsafe extern "system" fn main_window_proc(
                             let _ = KillTimer(Some(hwnd), TIMER_STATUS);
                             state.start_status_check();
                         }
+                        TIMER_RENDERER_RELEASE => {
+                            let _ = KillTimer(Some(hwnd), TIMER_RENDERER_RELEASE);
+                            if !IsWindowVisible(state.flyout).as_bool() {
+                                ui::release_card_device_tree();
+                                state.schedule_working_set_trim();
+                            }
+                        }
                         _ => {}
                     }
                     return LRESULT(0);
@@ -515,6 +524,12 @@ unsafe extern "system" fn main_window_proc(
                     if let Some(event) = session_change_event(message, wparam.0) {
                         state.handle_session_change(event);
                     }
+                    // Remote-session transitions can change SM_REMOTESESSION
+                    // without a theme preference change. Re-evaluate the
+                    // backdrop policy for every WTS session notification.
+                    state.theme = ui::detect_theme(&state.settings.theme);
+                    ui::configure_flyout(state.flyout, state.theme);
+                    let _ = InvalidateRect(Some(state.flyout), None, false);
                     return LRESULT(0);
                 }
                 WM_POWERBROADCAST => {
@@ -563,20 +578,7 @@ unsafe extern "system" fn flyout_window_proc(
         match message {
             WM_PAINT if !state_ptr.is_null() => {
                 let state = &*state_ptr;
-                ui::paint_card(
-                    hwnd,
-                    &state.display,
-                    state.locale,
-                    state.theme,
-                    ui::CardDecorations {
-                        pinned: state.settings.flyout_pinned,
-                        service_health: if state.settings.service_status_checks {
-                            service_health(state.service_status.status)
-                        } else {
-                            ui::ServiceHealth::Unknown
-                        },
-                    },
-                );
+                ui::paint_card(hwnd, &state.display, state.locale, state.theme);
                 return LRESULT(0);
             }
             WM_LBUTTONUP if !state_ptr.is_null() => {
@@ -584,10 +586,8 @@ unsafe extern "system" fn flyout_window_proc(
                 let x = (lparam.0 as u32 & 0xffff) as u16 as i16 as i32;
                 let y = ((lparam.0 as u32 >> 16) & 0xffff) as u16 as i16 as i32;
                 let dpi = GetDpiForWindow(hwnd).max(96);
-                if ui::pin_hit_test(x, y, dpi) {
-                    state.settings.flyout_pinned = !state.settings.flyout_pinned;
-                    state.persist_settings();
-                    let _ = InvalidateRect(Some(hwnd), None, false);
+                if ui::refresh_hit_test(x, y, dpi) {
+                    state.start_refresh(true);
                 }
                 return LRESULT(0);
             }
@@ -630,6 +630,9 @@ unsafe extern "system" fn flyout_window_proc(
                     suggested.bottom - suggested.top,
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
+                // The next paint releases the old back-buffer bitmap, resizes
+                // the physical-pixel swapchain, and reapplies the new D2D DPI.
+                let _ = InvalidateRect(Some(hwnd), None, false);
                 return LRESULT(0);
             }
             _ => {}
@@ -1165,9 +1168,14 @@ impl AppState {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
+            let _ = KillTimer(Some(self.hwnd), TIMER_RENDERER_RELEASE);
             let _ = ShowWindow(self.flyout, SW_HIDE);
         }
-        ui::release_card_resources();
+        ui::release_card_surface();
+        unsafe {
+            let _ =
+                SetTimer(Some(self.hwnd), TIMER_RENDERER_RELEASE, RENDERER_IDLE_RELEASE_MS, None);
+        }
         self.schedule_working_set_trim();
         self.try_apply_update();
     }
@@ -1228,7 +1236,18 @@ impl AppState {
         unsafe {
             let _ = GetMonitorInfoW(monitor, &mut info);
         }
-        let dpi = unsafe { GetDpiForWindow(self.flyout).max(GetDpiForSystem()).max(96) };
+        let dpi = unsafe {
+            let mut dpi_x = 96;
+            let mut dpi_y = 96;
+            if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok() {
+                dpi_x.max(96)
+            } else {
+                // This fallback is only used if shcore cannot query the target
+                // monitor. Never raise it to the system DPI: a PMv2 window may
+                // legitimately reside on a lower-DPI monitor.
+                GetDpiForWindow(self.flyout).max(96)
+            }
+        };
         let width = ui::scale(ui::CARD_WIDTH, dpi);
         let height = ui::scale(ui::CARD_HEIGHT, dpi);
         let gap = ui::scale(10, dpi);
@@ -1242,6 +1261,7 @@ impl AppState {
         self.flyout_ignore_inactive_until = Some(Instant::now() + FLYOUT_ACTIVATION_GUARD);
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
+            let _ = KillTimer(Some(self.hwnd), TIMER_RENDERER_RELEASE);
             let _ = SetWindowPos(self.flyout, None, x, y, width, height, SWP_SHOWWINDOW);
             let _ = SetForegroundWindow(self.flyout);
             let _ = SetTimer(Some(self.hwnd), TIMER_CARD, 30_000, None);
@@ -1753,6 +1773,7 @@ impl Drop for AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_UPDATE);
             let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
             let _ = KillTimer(Some(self.hwnd), TIMER_STATUS);
+            let _ = KillTimer(Some(self.hwnd), TIMER_RENDERER_RELEASE);
             if self.tray_added {
                 let data = self.notify_data();
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
@@ -1890,15 +1911,6 @@ fn diagnostic_window(window: Option<&QuotaWindow>) -> String {
             )
         },
     )
-}
-
-fn service_health(status: ServiceStatus) -> ui::ServiceHealth {
-    match status {
-        ServiceStatus::Operational => ui::ServiceHealth::Operational,
-        ServiceStatus::Degraded => ui::ServiceHealth::Degraded,
-        ServiceStatus::Outage => ui::ServiceHealth::Outage,
-        ServiceStatus::Unknown => ui::ServiceHealth::Unknown,
-    }
 }
 
 fn friendly_error(error: &str, locale: ui::Locale) -> String {

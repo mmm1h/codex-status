@@ -14,8 +14,8 @@ use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET,
     DEFAULT_PITCH, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
     DeleteDC, DeleteObject, DrawTextW, EndPaint, FF_SWISS, FONT_QUALITY, FW_NORMAL, FW_SEMIBOLD,
-    FillRect, FillRgn, GetTextExtentPoint32W, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-    SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    FillRect, FillRgn, GetTextExtentPoint32W, HDC, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS,
+    PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -26,10 +26,11 @@ use windows::core::{PCWSTR, w};
 use winreg::RegKey;
 use winreg::enums::HKEY_CURRENT_USER;
 
+mod backdrop;
 mod direct2d;
 
-pub const CARD_WIDTH: i32 = 376;
-pub const CARD_HEIGHT: i32 = 296;
+pub const CARD_WIDTH: i32 = 420;
+pub const CARD_HEIGHT: i32 = 430;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Locale {
@@ -80,21 +81,6 @@ pub struct Theme {
     line: COLORREF,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ServiceHealth {
-    #[default]
-    Unknown,
-    Operational,
-    Degraded,
-    Outage,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CardDecorations {
-    pub pinned: bool,
-    pub service_health: ServiceHealth,
-}
-
 pub fn detect_theme(preference: &str) -> Theme {
     let mut high_contrast =
         HIGHCONTRASTW { cbSize: size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
@@ -142,24 +128,24 @@ pub fn detect_theme(preference: &str) -> Theme {
             dark,
             tray_dark,
             high_contrast: false,
-            background: rgb(23, 25, 27),
-            surface: rgb(31, 35, 37),
-            surface_alt: rgb(36, 40, 42),
-            text: rgb(244, 247, 245),
-            muted: rgb(170, 179, 175),
-            line: rgb(54, 60, 61),
+            background: rgb(22, 25, 29),
+            surface: rgb(32, 36, 40),
+            surface_alt: rgb(39, 44, 48),
+            text: rgb(245, 248, 246),
+            muted: rgb(168, 177, 172),
+            line: rgb(63, 70, 73),
         }
     } else {
         Theme {
             dark,
             tray_dark,
             high_contrast: false,
-            background: rgb(244, 246, 247),
-            surface: rgb(255, 255, 255),
-            surface_alt: rgb(239, 243, 244),
-            text: rgb(17, 24, 32),
-            muted: rgb(86, 98, 108),
-            line: rgb(216, 224, 228),
+            background: rgb(243, 244, 240),
+            surface: rgb(254, 255, 252),
+            surface_alt: rgb(248, 250, 246),
+            text: rgb(29, 35, 32),
+            muted: rgb(94, 103, 98),
+            line: rgb(220, 225, 219),
         }
     }
 }
@@ -181,6 +167,7 @@ pub fn configure_flyout(hwnd: HWND, theme: Theme) {
             size_of_val(&corner) as u32,
         );
     }
+    backdrop::configure(hwnd, theme);
 }
 
 pub fn show_fatal_error(message: &str) {
@@ -230,13 +217,7 @@ pub fn tooltip_for_metric(state: &DisplayState, locale: Locale, metric: &str) ->
     }
 }
 
-pub fn paint_card(
-    hwnd: HWND,
-    state: &DisplayState,
-    locale: Locale,
-    theme: Theme,
-    decorations: CardDecorations,
-) {
+pub fn paint_card(hwnd: HWND, state: &DisplayState, locale: Locale, theme: Theme) {
     unsafe {
         let mut paint = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut paint);
@@ -253,17 +234,23 @@ pub fn paint_card(
             state,
             locale,
             theme,
-            decorations,
+            glass_enabled: backdrop::glass_enabled(hwnd),
         }) {
+            let requires_opaque = direct2d::take_gdi_frame_requires_opaque();
+            if direct2d::gdi_fallback_active() || requires_opaque {
+                // GDI cannot provide premultiplied composition content. Remove
+                // acrylic so the opaque fallback owns the first visible frame.
+                backdrop::disable_for_render_fallback(hwnd);
+            }
             let buffer = CreateCompatibleDC(Some(hdc));
             let bitmap = CreateCompatibleBitmap(hdc, width, height);
             if !buffer.is_invalid() && !bitmap.is_invalid() {
                 let old_bitmap = SelectObject(buffer, HGDIOBJ(bitmap.0));
-                draw_card(buffer, state, locale, theme, decorations, dpi);
+                draw_card(buffer, state, locale, theme, dpi);
                 let _ = BitBlt(hdc, 0, 0, width, height, Some(buffer), 0, 0, SRCCOPY);
                 let _ = SelectObject(buffer, old_bitmap);
             } else {
-                draw_card(hdc, state, locale, theme, decorations, dpi);
+                draw_card(hdc, state, locale, theme, dpi);
             }
             if !bitmap.is_invalid() {
                 let _ = DeleteObject(HGDIOBJ(bitmap.0));
@@ -272,22 +259,23 @@ pub fn paint_card(
                 let _ = DeleteDC(buffer);
             }
         }
+        let followup_paint = direct2d::take_followup_paint_request();
         let _ = EndPaint(hwnd, &paint);
+        if followup_paint {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
     }
 }
 
-pub fn release_card_resources() {
-    direct2d::release();
+pub fn release_card_surface() {
+    direct2d::release_surface();
 }
 
-unsafe fn draw_card(
-    hdc: HDC,
-    state: &DisplayState,
-    locale: Locale,
-    theme: Theme,
-    decorations: CardDecorations,
-    dpi: u32,
-) {
+pub fn release_card_device_tree() {
+    direct2d::release_device_tree();
+}
+
+unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme, dpi: u32) {
     unsafe {
         let width = scale(CARD_WIDTH, dpi);
         let height = scale(CARD_HEIGHT, dpi);
@@ -298,12 +286,12 @@ unsafe fn draw_card(
         fill_rounded(
             hdc,
             RECT {
-                left: scale(18, dpi),
-                top: scale(15, dpi),
-                right: scale(20, dpi),
-                bottom: scale(31, dpi),
+                left: scale(20, dpi),
+                top: scale(27, dpi),
+                right: scale(28, dpi),
+                bottom: scale(35, dpi),
             },
-            scale(2, dpi),
+            scale(8, dpi),
             status_color,
         );
         draw_text(
@@ -311,12 +299,12 @@ unsafe fn draw_card(
             locale,
             "CodexStatus",
             RECT {
-                left: scale(29, dpi),
-                top: scale(7, dpi),
-                right: scale(180, dpi),
-                bottom: scale(41, dpi),
+                left: scale(39, dpi),
+                top: scale(10, dpi),
+                right: scale(202, dpi),
+                bottom: scale(52, dpi),
             },
-            scale(14, dpi),
+            scale(18, dpi),
             FW_SEMIBOLD.0 as i32,
             theme.text,
         );
@@ -326,40 +314,40 @@ unsafe fn draw_card(
             locale,
             &updated_text(state, locale),
             RECT {
-                left: scale(190, dpi),
-                top: scale(8, dpi),
-                right: width - scale(48, dpi),
-                bottom: scale(40, dpi),
+                left: scale(205, dpi),
+                top: scale(11, dpi),
+                right: scale(365, dpi),
+                bottom: scale(51, dpi),
             },
-            scale(11, dpi),
+            scale(12, dpi),
             FW_NORMAL.0 as i32,
             theme.muted,
         );
-        draw_pin_button(hdc, decorations.pinned, theme, status_color, dpi);
+        draw_refresh_button(hdc, theme, dpi);
 
         let hero = RECT {
             left: scale(16, dpi),
-            top: scale(48, dpi),
+            top: scale(68, dpi),
             right: width - scale(16, dpi),
-            bottom: scale(176, dpi),
+            bottom: scale(282, dpi),
         };
-        outlined_surface(hdc, hero, scale(14, dpi), theme.surface, theme.line, dpi);
+        outlined_surface(hdc, hero, scale(19, dpi), theme.surface, theme.line, dpi);
 
         draw_text(
             hdc,
             locale,
             locale.text("Weekly remaining", "本周剩余"),
             RECT {
-                left: scale(30, dpi),
-                top: scale(59, dpi),
-                right: scale(178, dpi),
-                bottom: scale(83, dpi),
+                left: scale(34, dpi),
+                top: scale(82, dpi),
+                right: scale(210, dpi),
+                bottom: scale(115, dpi),
             },
-            scale(12, dpi),
-            FW_SEMIBOLD.0 as i32,
+            scale(15, dpi),
+            FW_NORMAL.0 as i32,
             theme.muted,
         );
-        draw_percentage(hdc, state.weekly_percent(), locale, theme, dpi);
+        draw_percentage(hdc, state.weekly_percent(), locale, theme, status_color, dpi);
 
         let reset = state
             .snapshot
@@ -375,10 +363,10 @@ unsafe fn draw_card(
         fill(
             hdc,
             RECT {
-                left: scale(202, dpi),
-                top: scale(65, dpi),
-                right: scale(203, dpi),
-                bottom: scale(132, dpi),
+                left: scale(220, dpi),
+                top: scale(91, dpi),
+                right: scale(221, dpi),
+                bottom: scale(184, dpi),
             },
             theme.line,
         );
@@ -387,13 +375,13 @@ unsafe fn draw_card(
             locale,
             locale.text("Reset in", "距离重置"),
             RECT {
-                left: scale(220, dpi),
-                top: scale(59, dpi),
-                right: width - scale(30, dpi),
-                bottom: scale(82, dpi),
+                left: scale(239, dpi),
+                top: scale(82, dpi),
+                right: scale(385, dpi),
+                bottom: scale(115, dpi),
             },
-            scale(12, dpi),
-            FW_SEMIBOLD.0 as i32,
+            scale(15, dpi),
+            FW_NORMAL.0 as i32,
             theme.muted,
         );
         draw_text(
@@ -401,12 +389,12 @@ unsafe fn draw_card(
             locale,
             &reset.0,
             RECT {
-                left: scale(220, dpi),
-                top: scale(79, dpi),
-                right: width - scale(30, dpi),
-                bottom: scale(108, dpi),
+                left: scale(239, dpi),
+                top: scale(109, dpi),
+                right: scale(385, dpi),
+                bottom: scale(146, dpi),
             },
-            scale(17, dpi),
+            scale(20, dpi),
             FW_SEMIBOLD.0 as i32,
             theme.text,
         );
@@ -415,23 +403,23 @@ unsafe fn draw_card(
             locale,
             &reset.1,
             RECT {
-                left: scale(220, dpi),
-                top: scale(107, dpi),
-                right: width - scale(30, dpi),
-                bottom: scale(132, dpi),
+                left: scale(239, dpi),
+                top: scale(143, dpi),
+                right: scale(385, dpi),
+                bottom: scale(171, dpi),
             },
-            scale(11, dpi),
+            scale(12, dpi),
             FW_NORMAL.0 as i32,
             theme.muted,
         );
 
         let bar = RECT {
-            left: scale(30, dpi),
-            top: scale(148, dpi),
-            right: width - scale(30, dpi),
-            bottom: scale(154, dpi),
+            left: scale(34, dpi),
+            top: scale(207, dpi),
+            right: width - scale(34, dpi),
+            bottom: scale(215, dpi),
         };
-        fill_rounded(hdc, bar, scale(6, dpi), theme.line);
+        fill_rounded(hdc, bar, scale(8, dpi), theme.line);
         if let Some(value) = state.weekly_percent() {
             let filled = (bar.left + (bar.right - bar.left) * i32::from(value) / 100)
                 .max(bar.left + (bar.bottom - bar.top));
@@ -439,7 +427,7 @@ unsafe fn draw_card(
                 fill_rounded(
                     hdc,
                     RECT { right: filled.min(bar.right), ..bar },
-                    scale(6, dpi),
+                    scale(8, dpi),
                     status_color,
                 );
             }
@@ -472,17 +460,17 @@ unsafe fn draw_card(
                         locale.text("Usage pace on track", "用量节奏正常")
                     },
                     RECT {
-                        left: scale(30, dpi),
-                        top: scale(156, dpi),
-                        right: width - scale(30, dpi),
-                        bottom: scale(174, dpi),
+                        left: scale(34, dpi),
+                        top: scale(222, dpi),
+                        right: width - scale(34, dpi),
+                        bottom: scale(259, dpi),
                     },
-                    scale(10, dpi),
-                    FW_NORMAL.0 as i32,
+                    scale(14, dpi),
+                    FW_SEMIBOLD.0 as i32,
                     if pace_warning && !theme.high_contrast {
                         rgb(210, 134, 0)
                     } else {
-                        theme.muted
+                        theme.text
                     },
                 );
             }
@@ -509,28 +497,19 @@ unsafe fn draw_card(
 
         let metrics = RECT {
             left: scale(16, dpi),
-            top: scale(184, dpi),
+            top: scale(298, dpi),
             right: width - scale(16, dpi),
-            bottom: scale(252, dpi),
+            bottom: scale(397, dpi),
         };
-        outlined_surface(hdc, metrics, scale(12, dpi), theme.surface_alt, theme.line, dpi);
+        outlined_surface(hdc, metrics, scale(19, dpi), theme.surface_alt, theme.line, dpi);
         if let Some(session) = session {
-            for divider in [scale(130, dpi), scale(246, dpi)] {
+            for divider in [scale(146, dpi), scale(274, dpi)] {
                 draw_metric_divider(hdc, metrics, divider, theme, dpi);
             }
             metric_column(
                 hdc,
                 locale,
-                RECT { right: scale(130, dpi), ..metrics },
-                locale.text("5-hour quota", "5 小时额度"),
-                &session,
-                theme,
-                dpi,
-            );
-            metric_column(
-                hdc,
-                locale,
-                RECT { left: scale(131, dpi), right: scale(246, dpi), ..metrics },
+                RECT { right: scale(146, dpi), ..metrics },
                 locale.text("Plan", "套餐"),
                 &plan,
                 theme,
@@ -539,14 +518,23 @@ unsafe fn draw_card(
             metric_column(
                 hdc,
                 locale,
-                RECT { left: scale(247, dpi), ..metrics },
+                RECT { left: scale(147, dpi), right: scale(274, dpi), ..metrics },
+                locale.text("5-hour", "5 小时"),
+                &session,
+                theme,
+                dpi,
+            );
+            metric_column(
+                hdc,
+                locale,
+                RECT { left: scale(275, dpi), ..metrics },
                 locale.text("Reset credits", "重置机会"),
                 &credits,
                 theme,
                 dpi,
             );
         } else {
-            let divider = scale(CARD_WIDTH / 2, dpi);
+            let divider = scale(220, dpi);
             draw_metric_divider(hdc, metrics, divider, theme, dpi);
             metric_column(
                 hdc,
@@ -568,91 +556,71 @@ unsafe fn draw_card(
             );
         }
 
-        let footer = footer_text(state, locale, decorations.service_health);
+        fill_rounded(
+            hdc,
+            RECT {
+                left: scale(21, dpi),
+                top: scale(412, dpi),
+                right: scale(27, dpi),
+                bottom: scale(418, dpi),
+            },
+            scale(6, dpi),
+            if state.error.is_some() { rgb(211, 64, 73) } else { status_color },
+        );
+        let footer = footer_text(state, locale);
         draw_text(
             hdc,
             locale,
             &footer,
             RECT {
-                left: scale(18, dpi),
-                top: scale(258, dpi),
+                left: scale(34, dpi),
+                top: scale(400, dpi),
                 right: width - scale(18, dpi),
-                bottom: height - scale(7, dpi),
+                bottom: height,
             },
-            scale(11, dpi),
+            scale(12, dpi),
             FW_NORMAL.0 as i32,
-            if state.error.is_some() {
-                status_color
-            } else {
-                match decorations.service_health {
-                    ServiceHealth::Degraded if !theme.high_contrast => rgb(184, 112, 0),
-                    ServiceHealth::Outage if !theme.high_contrast => rgb(211, 64, 73),
-                    ServiceHealth::Degraded | ServiceHealth::Outage => theme.text,
-                    _ => theme.muted,
-                }
-            },
+            if state.error.is_some() { rgb(211, 64, 73) } else { theme.muted },
         );
     }
 }
 
-pub fn pin_hit_test(x: i32, y: i32, dpi: u32) -> bool {
-    let rect = pin_rect(dpi);
+pub fn refresh_hit_test(x: i32, y: i32, dpi: u32) -> bool {
+    let rect = refresh_rect(dpi);
     x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
 }
 
-fn pin_rect(dpi: u32) -> RECT {
+fn refresh_rect(dpi: u32) -> RECT {
     RECT {
-        left: scale(337, dpi),
-        top: scale(9, dpi),
-        right: scale(361, dpi),
-        bottom: scale(36, dpi),
+        left: scale(366, dpi),
+        top: scale(5, dpi),
+        right: scale(418, dpi),
+        bottom: scale(56, dpi),
     }
 }
 
-unsafe fn draw_pin_button(hdc: HDC, pinned: bool, theme: Theme, accent: COLORREF, dpi: u32) {
+unsafe fn draw_refresh_button(hdc: HDC, theme: Theme, dpi: u32) {
     unsafe {
-        let rect = pin_rect(dpi);
-        outlined_surface(
+        let rect = RECT {
+            left: scale(374, dpi),
+            top: scale(11, dpi),
+            right: scale(411, dpi),
+            bottom: scale(49, dpi),
+        };
+        outlined_surface(hdc, rect, scale(12, dpi), theme.surface_alt, theme.line, dpi);
+        draw_text(
             hdc,
-            rect,
-            scale(8, dpi),
-            theme.surface_alt,
-            if pinned { accent } else { theme.line },
-            dpi,
-        );
-        let color = if pinned { accent } else { theme.muted };
-        let center = (rect.left + rect.right) / 2;
-        let unit = scale(1, dpi).max(1);
-        fill_rounded(
-            hdc,
+            Locale::English,
+            "↻",
             RECT {
-                left: center - scale(4, dpi),
-                top: rect.top + scale(7, dpi),
-                right: center + scale(4, dpi),
-                bottom: rect.top + scale(10, dpi),
+                left: rect.left + scale(8, dpi),
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
             },
-            unit,
-            color,
-        );
-        fill(
-            hdc,
-            RECT {
-                left: center - unit,
-                top: rect.top + scale(9, dpi),
-                right: center + unit,
-                bottom: rect.top + scale(18, dpi),
-            },
-            color,
-        );
-        fill(
-            hdc,
-            RECT {
-                left: center - scale(3, dpi),
-                top: rect.top + scale(13, dpi),
-                right: center + scale(3, dpi),
-                bottom: rect.top + scale(15, dpi),
-            },
-            color,
+            scale(22, dpi),
+            FW_NORMAL.0 as i32,
+            theme.muted,
         );
     }
 }
@@ -672,7 +640,14 @@ unsafe fn draw_metric_divider(hdc: HDC, metrics: RECT, divider: i32, theme: Them
     }
 }
 
-unsafe fn draw_percentage(hdc: HDC, percent: Option<u8>, locale: Locale, theme: Theme, dpi: u32) {
+unsafe fn draw_percentage(
+    hdc: HDC,
+    percent: Option<u8>,
+    locale: Locale,
+    theme: Theme,
+    accent: COLORREF,
+    dpi: u32,
+) {
     unsafe {
         let Some(percent) = percent else {
             draw_text(
@@ -680,12 +655,12 @@ unsafe fn draw_percentage(hdc: HDC, percent: Option<u8>, locale: Locale, theme: 
                 locale,
                 "--",
                 RECT {
-                    left: scale(30, dpi),
-                    top: scale(79, dpi),
-                    right: scale(174, dpi),
-                    bottom: scale(132, dpi),
+                    left: scale(34, dpi),
+                    top: scale(105, dpi),
+                    right: scale(207, dpi),
+                    bottom: scale(191, dpi),
                 },
-                scale(40, dpi),
+                scale(62, dpi),
                 FW_SEMIBOLD.0 as i32,
                 theme.text,
             );
@@ -697,31 +672,31 @@ unsafe fn draw_percentage(hdc: HDC, percent: Option<u8>, locale: Locale, theme: 
             locale,
             &number,
             RECT {
-                left: scale(30, dpi),
-                top: scale(77, dpi),
-                right: scale(160, dpi),
-                bottom: scale(134, dpi),
+                left: scale(34, dpi),
+                top: scale(105, dpi),
+                right: scale(207, dpi),
+                bottom: scale(191, dpi),
             },
-            scale(40, dpi),
+            scale(62, dpi),
             FW_SEMIBOLD.0 as i32,
-            theme.text,
+            accent,
         );
-        let number_left = scale(30, dpi);
+        let number_left = scale(34, dpi);
         let number_width =
-            measure_text_width(hdc, locale, &number, scale(40, dpi), FW_SEMIBOLD.0 as i32);
+            measure_text_width(hdc, locale, &number, scale(62, dpi), FW_SEMIBOLD.0 as i32);
         draw_text(
             hdc,
             locale,
             "%",
             RECT {
-                left: number_left + number_width + scale(3, dpi),
-                top: scale(91, dpi),
-                right: scale(177, dpi),
-                bottom: scale(128, dpi),
+                left: number_left + number_width + scale(2, dpi),
+                top: scale(125, dpi),
+                right: scale(215, dpi),
+                bottom: scale(184, dpi),
             },
-            scale(17, dpi),
+            scale(28, dpi),
             FW_SEMIBOLD.0 as i32,
-            theme.muted,
+            accent,
         );
     }
 }
@@ -742,11 +717,11 @@ unsafe fn metric_column(
             label,
             RECT {
                 left: rect.left + scale(12, dpi),
-                top: rect.top + scale(6, dpi),
+                top: rect.top + scale(9, dpi),
                 right: rect.right - scale(10, dpi),
-                bottom: rect.top + scale(29, dpi),
+                bottom: rect.top + scale(43, dpi),
             },
-            scale(11, dpi),
+            scale(14, dpi),
             FW_NORMAL.0 as i32,
             theme.muted,
         );
@@ -756,11 +731,11 @@ unsafe fn metric_column(
             value,
             RECT {
                 left: rect.left + scale(12, dpi),
-                top: rect.top + scale(27, dpi),
+                top: rect.top + scale(42, dpi),
                 right: rect.right - scale(10, dpi),
-                bottom: rect.bottom - scale(7, dpi),
+                bottom: rect.bottom - scale(8, dpi),
             },
-            scale(18, dpi),
+            scale(26, dpi),
             FW_SEMIBOLD.0 as i32,
             theme.text,
         );
@@ -809,7 +784,7 @@ fn updated_text(state: &DisplayState, locale: Locale) -> String {
     time.map_or_else(|| prefix.to_owned(), |time| format!("{prefix} {time}"))
 }
 
-fn footer_text(state: &DisplayState, locale: Locale, service_health: ServiceHealth) -> String {
+fn footer_text(state: &DisplayState, locale: Locale) -> String {
     if let Some(error) = state.error.as_deref() {
         let prefix = if state.weekly_percent().is_some() {
             locale.text("Cached · ", "缓存 · ")
@@ -821,19 +796,10 @@ fn footer_text(state: &DisplayState, locale: Locale, service_health: ServiceHeal
     if state.refresh_state == RefreshState::Loading {
         return locale.text("Refreshing Codex quota…", "正在刷新 Codex 额度…").to_owned();
     }
-    let base = if state.snapshot.is_some() {
+    if state.snapshot.is_some() {
         locale.text("Read only from local Codex", "仅从本机 Codex 读取").to_owned()
     } else {
         locale.text("Waiting for Codex", "等待 Codex 数据").to_owned()
-    };
-    match service_health {
-        ServiceHealth::Degraded => {
-            format!("{} · {base}", locale.text("OpenAI degraded", "OpenAI 服务降级"))
-        }
-        ServiceHealth::Outage => {
-            format!("{} · {base}", locale.text("OpenAI outage", "OpenAI 服务中断"))
-        }
-        _ => base,
     }
 }
 
@@ -868,6 +834,8 @@ fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
 
 pub(crate) fn plan_label(plan: &str) -> &str {
     match plan.to_ascii_lowercase().as_str() {
+        "free" => "Free",
+        "go" => "Go",
         "plus" => "Plus",
         "pro" => "Pro",
         "team" => "Team",
@@ -881,14 +849,11 @@ fn accent_for(state: &DisplayState, high_contrast: bool) -> COLORREF {
     if high_contrast {
         return rgb(255, 255, 255);
     }
-    if state.refresh_state != RefreshState::Live {
-        return rgb(91, 123, 153);
-    }
     match state.weekly_percent() {
         Some(value) if value < 20 => rgb(211, 64, 73),
         Some(value) if value < 50 => rgb(210, 134, 0),
-        Some(_) => rgb(16, 163, 127),
-        None => rgb(104, 109, 118),
+        Some(_) => rgb(18, 196, 105),
+        None => rgb(92, 116, 128),
     }
 }
 
@@ -1092,9 +1057,9 @@ mod tests {
     }
 
     #[test]
-    fn pin_hit_target_scales_with_dpi() {
-        assert!(pin_hit_test(349, 20, 96));
-        assert!(!pin_hit_test(330, 20, 96));
-        assert!(pin_hit_test(698, 40, 192));
+    fn refresh_hit_target_scales_with_dpi() {
+        assert!(refresh_hit_test(392, 30, 96));
+        assert!(!refresh_hit_test(350, 30, 96));
+        assert!(refresh_hit_test(784, 60, 192));
     }
 }
