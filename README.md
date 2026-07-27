@@ -70,7 +70,7 @@ Measured on Windows 11 24H2 x64 with a 120.77-second local v0.4.0 x64 Release re
 | Idle after the flyout closes | 3.56 MB average / 3.86 MB maximum | 0.0% observed | 0 |
 | Refreshing | <15 MB for the tray process | brief | 1 temporary `codex app-server` tree |
 
-The sample ended with two threads, fewer handles than it started, no change in GDI or USER object counts, and no child process. Direct2D and DirectWrite are loaded only while the card is visible; their objects are released when it closes and the working set is trimmed shortly afterward. The app-server process has a larger transient footprint because it is Codex itself; it exits immediately after the two account calls complete and is not part of the resident tray process. If Direct2D initialization ever fails, the previous GDI renderer remains available as a fallback.
+The sample ended with two threads, fewer handles than it started, no change in GDI or USER object counts, and no child process. The Direct2D render target, brushes, and DirectWrite text formats are created only while the card is visible; those objects are released when it closes and the working set is trimmed shortly afterward. The app-server process has a larger transient footprint because it is Codex itself; it exits immediately after the two account calls complete and is not part of the resident tray process. If Direct2D initialization ever fails, the previous GDI renderer remains available as a fallback.
 
 ## Build
 
