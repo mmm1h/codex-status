@@ -29,12 +29,16 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow,
     GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::Ime::ImmDisableIME;
-use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_ESCAPE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
+    TrackMouseEvent, VK_ESCAPE,
+};
 use windows::Win32::UI::Shell::{
     NIF_GUID, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
     NIIF_RESPECT_QUIET_TIME, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT,
@@ -49,11 +53,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
     TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
-    WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK,
-    WM_LBUTTONUP, WM_NULL, WM_PAINT, WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_RBUTTONUP,
-    WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_OVERLAPPED, WS_POPUP,
+    WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NULL, WM_PAINT,
+    WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
 };
 use windows::core::{GUID, PCWSTR, w};
 
@@ -182,6 +186,8 @@ struct AppState {
     tray_added: bool,
     refreshing: bool,
     refresh_pending: bool,
+    refresh_hovered: bool,
+    refresh_pointer_down: bool,
     update_checking: bool,
     pending_update: Option<updater::StagedUpdate>,
     status_checking: bool,
@@ -304,6 +310,8 @@ pub fn run() -> Result<(), AppError> {
         tray_added: false,
         refreshing: false,
         refresh_pending: false,
+        refresh_hovered: false,
+        refresh_pointer_down: false,
         update_checking: false,
         pending_update: None,
         status_checking: false,
@@ -578,16 +586,81 @@ unsafe extern "system" fn flyout_window_proc(
         match message {
             WM_PAINT if !state_ptr.is_null() => {
                 let state = &*state_ptr;
-                ui::paint_card(hwnd, &state.display, state.locale, state.theme);
+                let refresh_button = if state.refresh_pointer_down && state.refresh_hovered {
+                    ui::RefreshButtonState::Pressed
+                } else if state.refresh_hovered {
+                    ui::RefreshButtonState::Hovered
+                } else {
+                    ui::RefreshButtonState::Idle
+                };
+                ui::paint_card(
+                    hwnd,
+                    &state.display,
+                    state.locale,
+                    state.theme,
+                    refresh_button,
+                    state.refreshing,
+                );
+                return LRESULT(0);
+            }
+            WM_MOUSEMOVE if !state_ptr.is_null() => {
+                let state = &mut *state_ptr;
+                let (x, y) = message_point(lparam);
+                let dpi = GetDpiForWindow(hwnd).max(96);
+                let hovered = ui::refresh_hit_test(x, y, dpi);
+                if hovered != state.refresh_hovered {
+                    state.refresh_hovered = hovered;
+                    invalidate_refresh_button(hwnd, dpi);
+                }
+                let mut tracking = TRACKMOUSEEVENT {
+                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tracking);
+                return LRESULT(0);
+            }
+            WM_MOUSELEAVE if !state_ptr.is_null() => {
+                let state = &mut *state_ptr;
+                if state.refresh_hovered {
+                    state.refresh_hovered = false;
+                    invalidate_refresh_button(hwnd, GetDpiForWindow(hwnd).max(96));
+                }
+                return LRESULT(0);
+            }
+            WM_LBUTTONDOWN if !state_ptr.is_null() => {
+                let state = &mut *state_ptr;
+                let (x, y) = message_point(lparam);
+                let dpi = GetDpiForWindow(hwnd).max(96);
+                if !state.refreshing && ui::refresh_hit_test(x, y, dpi) {
+                    state.refresh_hovered = true;
+                    state.refresh_pointer_down = true;
+                    let _ = SetCapture(hwnd);
+                    invalidate_refresh_button(hwnd, dpi);
+                }
                 return LRESULT(0);
             }
             WM_LBUTTONUP if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
-                let x = (lparam.0 as u32 & 0xffff) as u16 as i16 as i32;
-                let y = ((lparam.0 as u32 >> 16) & 0xffff) as u16 as i16 as i32;
+                let (x, y) = message_point(lparam);
                 let dpi = GetDpiForWindow(hwnd).max(96);
-                if ui::refresh_hit_test(x, y, dpi) {
+                let hit = ui::refresh_hit_test(x, y, dpi);
+                let activate = state.refresh_pointer_down && hit && !state.refreshing;
+                state.refresh_pointer_down = false;
+                state.refresh_hovered = hit;
+                let _ = ReleaseCapture();
+                invalidate_refresh_button(hwnd, dpi);
+                if activate {
                     state.start_refresh(true);
+                }
+                return LRESULT(0);
+            }
+            WM_CAPTURECHANGED if !state_ptr.is_null() => {
+                let state = &mut *state_ptr;
+                if state.refresh_pointer_down {
+                    state.refresh_pointer_down = false;
+                    invalidate_refresh_button(hwnd, GetDpiForWindow(hwnd).max(96));
                 }
                 return LRESULT(0);
             }
@@ -638,6 +711,20 @@ unsafe extern "system" fn flyout_window_proc(
             _ => {}
         }
         DefWindowProcW(hwnd, message, wparam, lparam)
+    }
+}
+
+fn message_point(lparam: LPARAM) -> (i32, i32) {
+    let packed = lparam.0 as u32;
+    let x = (packed & 0xffff) as u16 as i16 as i32;
+    let y = ((packed >> 16) & 0xffff) as u16 as i16 as i32;
+    (x, y)
+}
+
+fn invalidate_refresh_button(hwnd: HWND, dpi: u32) {
+    let rect = ui::refresh_rect(dpi);
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), Some(&rect), false);
     }
 }
 
@@ -1165,7 +1252,10 @@ impl AppState {
     fn hide_flyout(&mut self) {
         self.flyout_ignore_inactive_until = None;
         self.flyout_hidden_for_tray_activation = None;
+        self.refresh_hovered = false;
+        self.refresh_pointer_down = false;
         unsafe {
+            let _ = ReleaseCapture();
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
             let _ = KillTimer(Some(self.hwnd), TIMER_RENDERER_RELEASE);

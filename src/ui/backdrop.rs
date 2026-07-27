@@ -53,8 +53,8 @@ const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
 // Verified on Windows 11 24H2. GradientColor is packed as
 // R | G << 8 | B << 16 | A << 24.
-const DARK_ACRYLIC_TINT: u32 = 0x961C_1812;
-const LIGHT_ACRYLIC_TINT: u32 = pack_gradient(248, 250, 246, 118);
+const DARK_ACRYLIC_TINT: u32 = pack_gradient(31, 34, 37, 150);
+const LIGHT_ACRYLIC_TINT: u32 = pack_gradient(229, 233, 239, 118);
 
 #[repr(C)]
 struct AccentPolicy {
@@ -191,6 +191,7 @@ mod tests {
 
     #[test]
     fn gradient_color_uses_verified_channel_order() {
-        assert_eq!(pack_gradient(18, 24, 28, 150), DARK_ACRYLIC_TINT);
+        assert_eq!(pack_gradient(31, 34, 37, 150), DARK_ACRYLIC_TINT);
+        assert_eq!(pack_gradient(229, 233, 239, 118), LIGHT_ACRYLIC_TINT);
     }
 }

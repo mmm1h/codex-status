@@ -7,9 +7,11 @@ All notable changes to CodexStatus are documented here.
 - Move the flyout from `ID2D1HwndRenderTarget` to D3D11, an `ID2D1DeviceContext`, and a premultiplied DirectComposition swapchain, with grayscale-antialiased text on transparent surfaces.
 - Add live Windows acrylic through `SetWindowCompositionAttribute`, with opaque rendering used for high contrast, disabled transparency effects, Remote Desktop, composition API failures, and graphics initialization or drawing failures; retain GDI as the final fallback.
 - Replace simulated card shadows, large-number glow, and progress-endpoint halo with `CLSID_D2D1Shadow` and `CLSID_D2D1GaussianBlur` effects.
-- Refine the flyout with layered translucent glass cards, whitespace-based grouping, vector refresh artwork, a borderless refresh button, local text scrims, and updated spacing and type hierarchy.
-- Add CodexStatus-designed Free, Go, Plus, 5x Pro, and 20x Pro plan badges whose shapes and tier marks communicate level without relying on color alone; these are not official OpenAI assets.
-- Read the plan identity from the Codex rate-limit bucket before the broader account token, so multiplier-specific tiers are labelled correctly.
+- Redesign the flyout as a calm typographic instrument: a neutral tonal ladder in both themes, one hero percentage over a tracked meter, supporting facts set as a single labelled row, and grouping carried by whitespace and elevation instead of rules or containers.
+- Drop the large-number glow in light themes, where an emissive halo reads as a rendering artifact rather than as light; dark themes keep only a faint lift.
+- Give the refresh control a real button container with distinct rest, hover, and pressed states, and show refresh progress in place.
+- Align surface geometry and type to the Windows type ramp and geometry guidance, and enable OpenType tabular figures so refreshed values no longer shift horizontally.
+- Read the plan identity from the Codex rate-limit bucket before the broader account token, and label plans the way the official Codex CLI does: `prolite` as Pro Lite, `pro` as Pro, `team` as Business, and `business` as Enterprise. Earlier releases labelled organisation plans one tier low.
 - State the projected weekly depletion time on the pace line when usage is clearly ahead of pace, keeping the local-read privacy note in the footer.
 - Keep flyout graphics devices available for quick reopening, then release the complete graphics stack after more than three minutes of inactivity.
 - Extend the existing `windows` crate feature set for Direct3D 11, DXGI, and DirectComposition without adding a new third-party crate.

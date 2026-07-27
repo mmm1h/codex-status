@@ -1,17 +1,13 @@
 //! Direct2D/DirectWrite renderer for the CodexStatus flyout.
 //!
-//! THESIS: the quota is a calm, luminous instrument, not a flat information
-//! table. OWN WORLD: pearl or frosted-graphite canvas, elevated soft panels,
-//! emerald light, generous 18-DIP radii, restrained shadows, and one Segoe UI
-//! Variable type system. STORY: weekly quota first, then reset timing and pace,
-//! followed by plan, optional five-hour quota, and reset credits. FIRST VIEWPORT:
-//! 420 × 430 DIPs; a compact header, one hero panel, one supporting panel, and a
-//! quiet privacy footer. FORM: the user-pinned Stitch “Compact Glass” reference;
-//! no randomized composition was used.
+//! The visual hierarchy is intentionally quiet: one raised quota surface, one
+//! sunken fact strip, restrained status color, and a neutral tool button. The
+//! D3D11/D2D/DComp device and fallback contracts remain independent of styling.
 
 use super::{
-    Locale, Theme, UsageProjection, footer_text, plan_label, projection_label, reset_details, rgb,
-    updated_text, weekly_usage_projection,
+    Locale, RefreshButtonState, Theme, accent_for, accent_red, footer_text, plan_label,
+    projection_label, refresh_button_fill, reset_details, rgb, updated_text,
+    weekly_usage_projection,
 };
 use crate::insights::analyze_window;
 use crate::model::DisplayState;
@@ -47,13 +43,13 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
-    DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_RANGE, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
     DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
-    IDWriteTextFormat,
+    IDWriteTextFormat, IDWriteTextLayout, IDWriteTypography,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN,
@@ -85,6 +81,8 @@ pub(super) struct PaintInput<'a> {
     pub state: &'a DisplayState,
     pub locale: Locale,
     pub theme: Theme,
+    pub refresh_button: RefreshButtonState,
+    pub refreshing: bool,
     pub glass_enabled: bool,
 }
 
@@ -262,6 +260,8 @@ impl Renderer {
             input.state,
             input.locale,
             input.theme,
+            input.refresh_button,
+            input.refreshing,
             input.glass_enabled,
         );
         let end_result = unsafe { context.EndDraw(None, None) };
@@ -494,29 +494,36 @@ fn is_device_lost(code: windows::core::HRESULT) -> bool {
 #[derive(Clone)]
 struct FormatSet {
     locale: Locale,
+    tabular: IDWriteTypography,
     header: IDWriteTextFormat,
     update: IDWriteTextFormat,
     label: IDWriteTextFormat,
     quota: IDWriteTextFormat,
-    percent: IDWriteTextFormat,
     reset_value: IDWriteTextFormat,
     secondary: IDWriteTextFormat,
     pace: IDWriteTextFormat,
     metric_label: IDWriteTextFormat,
     metric_value: IDWriteTextFormat,
-    badge: IDWriteTextFormat,
     footer: IDWriteTextFormat,
 }
 
 impl FormatSet {
     fn new(factory: &IDWriteFactory, family: PCWSTR, locale: Locale) -> Result<Self> {
+        let tabular = unsafe { factory.CreateTypography()? };
+        unsafe {
+            tabular.AddFontFeature(DWRITE_FONT_FEATURE {
+                nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+                parameter: 1,
+            })?;
+        }
         Ok(Self {
             locale,
+            tabular,
             header: make_format(
                 factory,
                 family,
                 locale,
-                18.0,
+                14.0,
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
                 false,
@@ -525,16 +532,16 @@ impl FormatSet {
                 factory,
                 family,
                 locale,
-                12.5,
+                12.0,
                 DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_TEXT_ALIGNMENT_TRAILING,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
                 true,
             )?,
             label: make_format(
                 factory,
                 family,
                 locale,
-                15.0,
+                14.0,
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
                 true,
@@ -543,16 +550,7 @@ impl FormatSet {
                 factory,
                 family,
                 locale,
-                64.0,
-                DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                DWRITE_TEXT_ALIGNMENT_LEADING,
-                false,
-            )?,
-            percent: make_format(
-                factory,
-                family,
-                locale,
-                29.0,
+                68.0,
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
                 false,
@@ -570,7 +568,7 @@ impl FormatSet {
                 factory,
                 family,
                 locale,
-                12.5,
+                12.0,
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
                 true,
@@ -580,7 +578,7 @@ impl FormatSet {
                 family,
                 locale,
                 14.0,
-                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
                 true,
             )?,
@@ -588,7 +586,7 @@ impl FormatSet {
                 factory,
                 family,
                 locale,
-                14.0,
+                12.0,
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
                 true,
@@ -597,18 +595,9 @@ impl FormatSet {
                 factory,
                 family,
                 locale,
-                27.0,
+                20.0,
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
-                true,
-            )?,
-            badge: make_format(
-                factory,
-                family,
-                locale,
-                14.0,
-                DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                DWRITE_TEXT_ALIGNMENT_CENTER,
                 true,
             )?,
             footer: make_format(
@@ -692,48 +681,31 @@ struct Brushes {
     track: ID2D1SolidColorBrush,
     accent: ID2D1SolidColorBrush,
     accent_glow_soft: ID2D1SolidColorBrush,
-    accent_glow: ID2D1SolidColorBrush,
-    warning: ID2D1SolidColorBrush,
     error: ID2D1SolidColorBrush,
 }
 
 impl Brushes {
     fn new(target: &ID2D1DeviceContext, state: &DisplayState, theme: Theme) -> Result<Self> {
-        let accent = accent_for_theme(state, theme);
-        let track = mix_color(theme.line, theme.surface, if theme.dark { 0.12 } else { 0.28 });
-        let warning = if theme.high_contrast {
-            theme.text
-        } else if theme.dark {
-            rgb(255, 190, 86)
-        } else {
-            rgb(184, 111, 17)
-        };
-        let error = if theme.high_contrast {
-            theme.text
-        } else if theme.dark {
-            rgb(255, 126, 137)
-        } else {
-            rgb(202, 55, 70)
-        };
-        let glow_allowed = !theme.high_contrast;
+        let accent = accent_for(state, theme);
+        let error = if theme.high_contrast { theme.text } else { accent_red(theme) };
+        let glow_allowed = theme.dark && !theme.high_contrast;
         Ok(Self {
             text: solid_brush(target, theme.text)?,
             muted: solid_brush(target, theme.muted)?,
             line: solid_brush(target, theme.line)?,
-            track: solid_brush(target, track)?,
+            track: solid_brush(target, theme.line)?,
             accent: solid_brush(target, accent)?,
             accent_glow_soft: solid_brush_alpha(
                 target,
                 accent,
-                if glow_allowed { 0.10 } else { 0.0 },
+                if glow_allowed { 0.08 } else { 0.0 },
             )?,
-            accent_glow: solid_brush_alpha(target, accent, if glow_allowed { 0.25 } else { 0.0 })?,
-            warning: solid_brush(target, warning)?,
             error: solid_brush(target, error)?,
         })
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_frame(
     target: &ID2D1DeviceContext,
     dwrite: &IDWriteFactory,
@@ -741,17 +713,28 @@ fn draw_frame(
     state: &DisplayState,
     locale: Locale,
     theme: Theme,
+    refresh_button: RefreshButtonState,
+    refreshing: bool,
     glass_enabled: bool,
 ) -> Result<()> {
     let brushes = Brushes::new(target, state, theme)?;
-    let accent = accent_for_theme(state, theme);
+    let accent = accent_for(state, theme);
     draw_background_layer(target, theme, glass_enabled)?;
 
-    draw_surface_layer(target, &brushes, theme, accent)?;
+    draw_surface_layer(target, &brushes, theme)?;
     draw_glass_text_scrims(target, theme, glass_enabled)?;
-    draw_header_content(target, formats, &brushes, state, locale, theme)?;
+    draw_header_content(
+        target,
+        dwrite,
+        formats,
+        &brushes,
+        state,
+        theme,
+        refresh_button,
+        refreshing,
+    )?;
     draw_hero_content(target, dwrite, formats, &brushes, state, locale, theme, accent)?;
-    draw_metrics_content(target, dwrite, formats, &brushes, state, locale, theme)?;
+    draw_metrics_content(target, dwrite, formats, &brushes, state, locale)?;
     draw_footer_content(target, formats, &brushes, state, locale);
     Ok(())
 }
@@ -768,14 +751,17 @@ fn draw_background_layer(
             color(theme.background)
         }));
     }
+    if theme.high_contrast {
+        return Ok(());
+    }
     let (start, end, alpha) = if glass_enabled {
         if theme.dark {
-            (rgb(19, 22, 27), theme.background, 0.34)
+            (rgb(25, 28, 31), theme.background, 0.42)
         } else {
-            (rgb(250, 250, 247), theme.background, 0.40)
+            (rgb(240, 244, 248), theme.background, 0.46)
         }
     } else {
-        (if theme.dark { rgb(19, 22, 27) } else { rgb(250, 250, 247) }, theme.background, 1.0)
+        (if theme.dark { rgb(25, 28, 31) } else { rgb(240, 244, 248) }, theme.background, 1.0)
     };
     let background = linear_gradient_alpha(
         target,
@@ -791,73 +777,49 @@ fn draw_background_layer(
     Ok(())
 }
 
-fn draw_surface_layer(
-    target: &ID2D1DeviceContext,
-    brushes: &Brushes,
-    theme: Theme,
-    accent_color: COLORREF,
-) -> Result<()> {
-    let hero = rounded_rect(16.0, 68.0, 404.0, 280.0, 18.0);
-    let hero_tint = mix_color(theme.surface, accent_color, if theme.dark { 0.075 } else { 0.035 });
+fn draw_surface_layer(target: &ID2D1DeviceContext, brushes: &Brushes, theme: Theme) -> Result<()> {
+    let hero = rounded_rect(16.0, 64.0, 404.0, 385.0, 8.0);
     let hero_gradient = linear_gradient_alpha_pair(
         target,
-        hero_tint,
+        theme.surface,
         theme.surface,
         if theme.high_contrast {
             1.0
         } else if theme.dark {
-            0.76
+            0.90
         } else {
-            0.86
+            0.92
         },
         if theme.high_contrast {
             1.0
         } else if theme.dark {
-            0.66
-        } else {
-            0.78
-        },
-        Vector2 { X: 20.0, Y: 76.0 },
-        Vector2 { X: 398.0, Y: 266.0 },
-    )?;
-    let metrics = rounded_rect(16.0, 294.0, 404.0, 390.0, 18.0);
-    let metric_tint = if theme.dark {
-        mix_color(theme.surface_alt, theme.surface, 0.30)
-    } else {
-        mix_color(theme.surface_alt, theme.surface, 0.62)
-    };
-    let metric_gradient = linear_gradient_alpha_pair(
-        target,
-        metric_tint,
-        theme.surface,
-        if theme.high_contrast {
-            1.0
-        } else if theme.dark {
-            0.70
-        } else {
             0.82
+        } else {
+            0.84
         },
+        Vector2 { X: 20.0, Y: 68.0 },
+        Vector2 { X: 398.0, Y: 376.0 },
+    )?;
+    let facts = rounded_rect(16.0, 315.0, 404.0, 385.0, 8.0);
+    let fact_brush = solid_brush_alpha(
+        target,
+        theme.surface_alt,
         if theme.high_contrast {
             1.0
         } else if theme.dark {
-            0.60
+            0.96
         } else {
-            0.74
+            0.92
         },
-        Vector2 { X: 20.0, Y: 302.0 },
-        Vector2 { X: 400.0, Y: 394.0 },
     )?;
     if !theme.high_contrast {
         let mask = record_mask(target, |context, brush| unsafe {
             context.FillRoundedRectangle(&hero, brush);
-            context.FillRoundedRectangle(&metrics, brush);
         })?;
         let shadow = unsafe { target.CreateEffect(&CLSID_D2D1Shadow)? };
-        // The cards sit 16 DIPs from the window edge; sigma stays near 5 so
-        // the effect's ~3σ expansion has real padding instead of being clipped.
-        let sigma = if theme.dark { 5.2_f32 } else { 4.8_f32 };
+        let sigma = if theme.dark { 5.2_f32 } else { 4.6_f32 };
         let shadow_color =
-            if theme.dark { [0.0_f32, 0.0, 0.0, 0.52] } else { [0.10_f32, 0.14, 0.12, 0.28] };
+            if theme.dark { [0.0_f32, 0.0, 0.0, 0.48] } else { [0.08_f32, 0.11, 0.15, 0.22] };
         unsafe {
             shadow.SetInput(0, &mask, true);
             shadow.SetValue(
@@ -882,10 +844,10 @@ fn draw_surface_layer(
     }
     unsafe {
         target.FillRoundedRectangle(&hero, &hero_gradient);
-        target.FillRoundedRectangle(&metrics, &metric_gradient);
+        target.FillRoundedRectangle(&facts, &fact_brush);
         if theme.high_contrast {
             target.DrawRoundedRectangle(&hero, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
-            target.DrawRoundedRectangle(&metrics, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
+            target.DrawRoundedRectangle(&facts, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
         }
     }
     Ok(())
@@ -900,45 +862,54 @@ fn draw_glass_text_scrims(
         return Ok(());
     }
 
-    let scrim_color = if theme.dark { rgb(7, 9, 12) } else { rgb(255, 255, 252) };
-    let scrim = solid_brush_alpha(target, scrim_color, if theme.dark { 0.24 } else { 0.30 })?;
+    let scrim_color = if theme.dark { rgb(20, 22, 25) } else { rgb(237, 241, 245) };
+    let scrim = solid_brush_alpha(target, scrim_color, if theme.dark { 0.18 } else { 0.20 })?;
     unsafe {
-        target.FillRoundedRectangle(&rounded_rect(12.0, 8.0, 367.0, 54.0, 14.0), &scrim);
-        target.FillRoundedRectangle(&rounded_rect(15.0, 394.0, 405.0, 428.0, 12.0), &scrim);
+        target.FillRectangle(&rect(0.0, 0.0, 420.0, 64.0), &scrim);
+        target.FillRectangle(&rect(0.0, 385.0, 420.0, 430.0), &scrim);
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_header_content(
     target: &ID2D1DeviceContext,
+    dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
     state: &DisplayState,
-    locale: Locale,
     theme: Theme,
+    button_state: RefreshButtonState,
+    refreshing: bool,
 ) -> Result<()> {
+    let button_brush = solid_brush(target, refresh_button_fill(theme, button_state))?;
+    let button = rounded_rect(371.0, 16.0, 407.0, 52.0, 4.0);
     unsafe {
-        if !theme.high_contrast {
-            target.FillEllipse(&ellipse(24.0, 31.0, 11.0), &brushes.accent_glow_soft);
-            target.FillEllipse(&ellipse(24.0, 31.0, 7.0), &brushes.accent_glow);
-        }
-        target.FillEllipse(&ellipse(24.0, 31.0, 4.2), &brushes.accent);
-        draw_text(
+        target.FillEllipse(&ellipse(24.0, 30.0, 4.0), &brushes.accent);
+        draw_text(target, "Codex", rect(39.0, 8.0, 102.0, 52.0), &formats.header, &brushes.text);
+        draw_tabular_text(
             target,
-            "CodexStatus",
-            rect(39.0, 10.0, 202.0, 52.0),
-            &formats.header,
-            &brushes.text,
-        );
-        draw_text(
-            target,
-            &updated_text(state, locale),
-            rect(205.0, 11.0, 365.0, 51.0),
+            dwrite,
+            formats,
+            &updated_text(state),
+            rect(108.0, 9.0, 245.0, 51.0),
             &formats.update,
             &brushes.muted,
-        );
-
-        draw_ring_arrow(target, 393.0, 30.0, 8.2, &brushes.muted, 1.8)?;
+        )?;
+        target.FillRoundedRectangle(&button, &button_brush);
+        if theme.high_contrast {
+            target.DrawRoundedRectangle(&button, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
+        }
+        let icon_brush = if button_state == RefreshButtonState::Pressed {
+            &brushes.text
+        } else {
+            &brushes.muted
+        };
+        if refreshing {
+            draw_spinner(target, 389.0, 34.0, 8.0, icon_brush, 1.8);
+        } else {
+            draw_ring_arrow(target, 389.0, 34.0, 7.4, icon_brush, 1.7)?;
+        }
     }
     Ok(())
 }
@@ -954,16 +925,16 @@ fn draw_hero_content(
     theme: Theme,
     accent_color: COLORREF,
 ) -> Result<()> {
+    draw_percentage(target, dwrite, formats, brushes, state.weekly_percent(), theme)?;
     unsafe {
         draw_text(
             target,
             locale.text("Weekly remaining", "本周剩余"),
-            rect(34.0, 82.0, 210.0, 115.0),
+            rect(32.0, 145.0, 230.0, 176.0),
             &formats.label,
             &brushes.muted,
         );
     }
-    draw_percentage(target, dwrite, formats, brushes, state.weekly_percent(), theme)?;
 
     let reset = state
         .snapshot
@@ -981,27 +952,31 @@ fn draw_hero_content(
         draw_text(
             target,
             locale.text("Reset in", "距离重置"),
-            rect(239.0, 82.0, 383.0, 115.0),
-            &formats.label,
-            &brushes.muted,
-        );
-        draw_text(
-            target,
-            &reset.0,
-            rect(239.0, 109.0, 385.0, 146.0),
-            &formats.reset_value,
-            &brushes.text,
-        );
-        draw_text(
-            target,
-            &reset.1,
-            rect(239.0, 143.0, 385.0, 171.0),
+            rect(32.0, 235.0, 388.0, 264.0),
             &formats.secondary,
             &brushes.muted,
         );
+        draw_tabular_text(
+            target,
+            dwrite,
+            formats,
+            &reset.0,
+            rect(32.0, 258.0, 388.0, 291.0),
+            &formats.reset_value,
+            &brushes.text,
+        )?;
+        draw_tabular_text(
+            target,
+            dwrite,
+            formats,
+            &reset.1,
+            rect(32.0, 286.0, 388.0, 312.0),
+            &formats.secondary,
+            &brushes.muted,
+        )?;
     }
 
-    draw_quota_track(target, formats, brushes, state, locale, theme, accent_color)?;
+    draw_quota_track(target, dwrite, formats, brushes, state, locale, theme, accent_color)?;
     Ok(())
 }
 
@@ -1014,38 +989,60 @@ fn draw_percentage(
     theme: Theme,
 ) -> Result<()> {
     let number = percent.map_or_else(|| "--".to_owned(), |value| value.to_string());
-    let width = text_width(dwrite, &number, &formats.quota, 170.0, 80.0)?;
-    let number_rect = rect(33.0, 105.0, 207.0, 191.0);
-    if percent.is_some() && !theme.high_contrast {
+    let text = if percent.is_some() { format!("{number}%") } else { number };
+    let layout = percentage_layout(dwrite, formats, &text, percent.is_some())?;
+    let origin = Vector2 { X: 32.0, Y: 68.0 };
+    if percent.is_some() && theme.dark && !theme.high_contrast {
         let mask = record_mask(target, |context, _| unsafe {
-            draw_text(context, &number, number_rect, &formats.quota, &brushes.accent);
+            context.DrawTextLayout(
+                origin,
+                &layout,
+                &brushes.accent_glow_soft,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
         })?;
-        draw_blurred_mask(target, &mask, 8.5)?;
+        draw_blurred_mask(target, &mask, 3.0)?;
     }
     unsafe {
-        draw_text(
-            target,
-            &number,
-            number_rect,
-            &formats.quota,
+        target.DrawTextLayout(
+            origin,
+            &layout,
             if percent.is_some() { &brushes.accent } else { &brushes.text },
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
         );
-        if percent.is_some() {
-            draw_text(
-                target,
-                "%",
-                rect(36.0 + width, 125.0, 213.0, 184.0),
-                &formats.percent,
-                &brushes.accent,
-            );
-        }
     }
     Ok(())
+}
+
+fn percentage_layout(
+    factory: &IDWriteFactory,
+    formats: &FormatSet,
+    text: &str,
+    has_percent: bool,
+) -> Result<IDWriteTextLayout> {
+    let text_utf16: Vec<u16> = text.encode_utf16().collect();
+    let layout = unsafe { factory.CreateTextLayout(&text_utf16, &formats.quota, 300.0, 92.0)? };
+    unsafe {
+        layout.SetTypography(
+            &formats.tabular,
+            DWRITE_TEXT_RANGE { startPosition: 0, length: text_utf16.len() as u32 },
+        )?;
+        if has_percent {
+            let percent = DWRITE_TEXT_RANGE {
+                startPosition: text_utf16.len().saturating_sub(1) as u32,
+                length: 1,
+            };
+            layout.SetFontSize(20.0, percent)?;
+            layout.SetFontWeight(DWRITE_FONT_WEIGHT_NORMAL, percent)?;
+        }
+    }
+    Ok(layout)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn draw_quota_track(
     target: &ID2D1DeviceContext,
+    dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
     state: &DisplayState,
@@ -1053,10 +1050,10 @@ fn draw_quota_track(
     theme: Theme,
     accent_color: COLORREF,
 ) -> Result<()> {
-    let left = 34.0;
-    let right = 386.0;
-    let top = 200.0;
-    let bottom = 208.0;
+    let left = 32.0;
+    let right = 388.0;
+    let top = 181.0;
+    let bottom = 189.0;
     unsafe {
         target.FillRoundedRectangle(&rounded_rect(left, top, right, bottom, 4.0), &brushes.track);
     }
@@ -1064,7 +1061,7 @@ fn draw_quota_track(
     if let Some(value) = state.weekly_percent()
         && value > 0
     {
-        let filled = (left + (right - left) * f32::from(value) / 100.0).clamp(left + 8.0, right);
+        let filled = (left + (right - left) * f32::from(value) / 100.0).clamp(left + 6.0, right);
         let start_color =
             mix_color(accent_color, theme.surface, if theme.dark { 0.12 } else { 0.20 });
         let progress = linear_gradient(
@@ -1076,15 +1073,6 @@ fn draw_quota_track(
         )?;
         unsafe {
             target.FillRoundedRectangle(&rounded_rect(left, top, filled, bottom, 4.0), &progress);
-            if value < 100 {
-                if !theme.high_contrast {
-                    let mask = record_mask(target, |context, _| {
-                        context.FillEllipse(&ellipse(filled, 204.0, 5.0), &brushes.accent);
-                    })?;
-                    draw_blurred_mask(target, &mask, 6.0)?;
-                }
-                target.FillEllipse(&ellipse(filled, 204.0, 4.5), &brushes.accent);
-            }
         }
     }
 
@@ -1096,21 +1084,6 @@ fn draw_quota_track(
             snapshot.weekly.as_ref().map(|window| analyze_window(window, snapshot.fetched_at))
         })
         .filter(|insight| insight.reset_at.is_some_and(|reset_at| reset_at > now));
-    if let Some(insight) = pace_insight {
-        if let Some(elapsed) = insight.elapsed_percent {
-            let expected_remaining = (100.0 - elapsed).clamp(0.0, 100.0) as f32;
-            let marker = left + (right - left) * expected_remaining / 100.0;
-            unsafe {
-                target.DrawLine(
-                    Vector2 { X: marker, Y: top - 2.0 },
-                    Vector2 { X: marker, Y: bottom + 2.0 },
-                    &brushes.muted,
-                    1.0,
-                    None::<&ID2D1StrokeStyle>,
-                );
-            }
-        }
-    }
     let projection = weekly_usage_projection(state, now);
     let pace_text = projection.map_or_else(
         || {
@@ -1122,19 +1095,15 @@ fn draw_quota_track(
         },
         |value| projection_label(value, locale).text,
     );
-    unsafe {
-        draw_text(
-            target,
-            &pace_text,
-            rect(34.0, 221.0, 386.0, 263.0),
-            &formats.pace,
-            match projection {
-                Some(UsageProjection::Exhausted) => &brushes.error,
-                Some(UsageProjection::DepletesIn { .. }) => &brushes.warning,
-                None => &brushes.text,
-            },
-        );
-    }
+    draw_tabular_text(
+        target,
+        dwrite,
+        formats,
+        &pace_text,
+        rect(32.0, 190.0, 388.0, 225.0),
+        &formats.pace,
+        &brushes.muted,
+    )?;
     Ok(())
 }
 
@@ -1145,16 +1114,19 @@ fn draw_metrics_content(
     brushes: &Brushes,
     state: &DisplayState,
     locale: Locale,
-    theme: Theme,
 ) -> Result<()> {
     let session = state
         .snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.session.as_ref())
         .map(|window| format!("{}%", window.display_percent()));
-    let plan_type =
-        state.snapshot.as_ref().and_then(|snapshot| snapshot.account.plan_type.as_deref());
-    let plan = plan_type.map(|plan| plan_label(plan, locale)).unwrap_or("--").to_owned();
+    let plan = state
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.account.plan_type.as_deref())
+        .map(|plan| plan_label(plan, locale))
+        .unwrap_or("--")
+        .to_owned();
     let credits = state
         .snapshot
         .as_ref()
@@ -1163,197 +1135,84 @@ fn draw_metrics_content(
         .unwrap_or_else(|| "--".to_owned());
 
     if let Some(session) = session {
-        draw_plan_metric(
+        draw_metric(
             target,
             dwrite,
             formats,
             brushes,
-            rect(17.0, 295.0, 146.0, 389.0),
-            plan_type,
+            rect(16.0, 315.0, 151.0, 385.0),
+            locale.text("Plan", "套餐"),
             &plan,
-            theme,
         )?;
         draw_metric(
             target,
+            dwrite,
             formats,
             brushes,
-            rect(147.0, 295.0, 274.0, 389.0),
-            locale.text("5-hour", "5 小时"),
+            rect(151.0, 315.0, 282.0, 385.0),
+            locale.text("Session quota", "会话额度"),
             &session,
-        );
+        )?;
         draw_metric(
-            target,
-            formats,
-            brushes,
-            rect(275.0, 295.0, 403.0, 389.0),
-            locale.text("Reset credits", "重置机会"),
-            &credits,
-        );
-    } else {
-        draw_plan_metric(
             target,
             dwrite,
             formats,
             brushes,
-            rect(17.0, 295.0, 220.0, 389.0),
-            plan_type,
+            rect(282.0, 315.0, 404.0, 385.0),
+            locale.text("Reset credits", "重置机会"),
+            &credits,
+        )?;
+    } else {
+        draw_metric(
+            target,
+            dwrite,
+            formats,
+            brushes,
+            rect(16.0, 315.0, 220.0, 385.0),
+            locale.text("Plan", "套餐"),
             &plan,
-            theme,
         )?;
         draw_metric(
             target,
+            dwrite,
             formats,
             brushes,
-            rect(221.0, 295.0, 403.0, 389.0),
+            rect(220.0, 315.0, 404.0, 385.0),
             locale.text("Reset credits", "重置机会"),
             &credits,
-        );
-        draw_ring_arrow(target, 371.0, 351.0, 10.5, &brushes.muted, 2.0)?;
+        )?;
     }
     Ok(())
 }
 
 fn draw_metric(
     target: &ID2D1DeviceContext,
+    dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
     area: D2D_RECT_F,
     label: &str,
     value: &str,
-) {
+) -> Result<()> {
     unsafe {
         draw_text(
             target,
             label,
-            rect(area.left + 17.0, area.top + 9.0, area.right - 13.0, area.top + 43.0),
+            rect(area.left + 16.0, area.top + 5.0, area.right - 8.0, area.top + 34.0),
             &formats.metric_label,
             &brushes.muted,
         );
-        draw_text(
+        draw_tabular_text(
             target,
+            dwrite,
+            formats,
             value,
-            rect(area.left + 17.0, area.top + 42.0, area.right - 13.0, area.bottom - 8.0),
+            rect(area.left + 16.0, area.top + 30.0, area.right - 8.0, area.bottom - 4.0),
             &formats.metric_value,
             &brushes.text,
-        );
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_plan_metric(
-    target: &ID2D1DeviceContext,
-    dwrite: &IDWriteFactory,
-    formats: &FormatSet,
-    brushes: &Brushes,
-    area: D2D_RECT_F,
-    plan_type: Option<&str>,
-    plan: &str,
-    theme: Theme,
-) -> Result<()> {
-    unsafe {
-        draw_text(
-            target,
-            if formats.locale == Locale::Chinese { "套餐" } else { "Plan" },
-            rect(area.left + 17.0, area.top + 8.0, area.right - 13.0, area.top + 41.0),
-            &formats.metric_label,
-            &brushes.muted,
-        );
-    }
-    draw_plan_badge(
-        target,
-        dwrite,
-        formats,
-        brushes,
-        plan_type,
-        plan,
-        area.left + 17.0,
-        area.top + 43.0,
-        (area.right - area.left - 34.0).max(58.0),
-        theme,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_plan_badge(
-    target: &ID2D1DeviceContext,
-    dwrite: &IDWriteFactory,
-    formats: &FormatSet,
-    brushes: &Brushes,
-    plan_type: Option<&str>,
-    plan: &str,
-    x: f32,
-    y: f32,
-    max_width: f32,
-    theme: Theme,
-) -> Result<()> {
-    let tier = plan_badge_tier(plan_type);
-    let text_width = text_width(dwrite, plan, &formats.badge, max_width, 32.0)?;
-    let width = (text_width + 46.0).clamp(66.0, max_width);
-    let badge = rounded_rect(x, y, x + width, y + 32.0, 11.0);
-    let (start, end, start_alpha, end_alpha) = match tier {
-        1 => (theme.surface_alt, theme.surface, 0.72, 0.48),
-        2 => (rgb(36, 150, 121), rgb(67, 196, 154), 0.78, 0.58),
-        3 => (rgb(44, 112, 186), rgb(77, 145, 218), 0.82, 0.64),
-        4 => (rgb(86, 83, 196), rgb(145, 96, 211), 0.86, 0.68),
-        5 => (rgb(37, 43, 68), rgb(111, 72, 165), 0.90, 0.70),
-        _ => (theme.surface_alt, theme.surface, 0.66, 0.44),
-    };
-    if theme.high_contrast {
-        unsafe {
-            target.DrawRoundedRectangle(&badge, &brushes.text, 1.5, None::<&ID2D1StrokeStyle>);
-        }
-    } else {
-        let fill = linear_gradient_alpha_pair(
-            target,
-            start,
-            end,
-            start_alpha,
-            end_alpha,
-            Vector2 { X: x, Y: y },
-            Vector2 { X: x + width, Y: y + 32.0 },
         )?;
-        unsafe {
-            target.FillRoundedRectangle(&badge, &fill);
-            target.DrawRoundedRectangle(&badge, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
-        }
-    }
-
-    let chip_foreground = solid_brush(target, rgb(250, 252, 250))?;
-    let marker_brush =
-        if theme.high_contrast || tier <= 1 { &brushes.text } else { &chip_foreground };
-    for index in 0..5 {
-        let left = x + 9.0 + index as f32 * 3.6;
-        let height = 4.0 + index as f32 * 1.8;
-        let marker = rounded_rect(left, y + 22.0 - height, left + 2.2, y + 22.0, 1.1);
-        unsafe {
-            if tier == 0 || index >= tier {
-                target.DrawRoundedRectangle(&marker, marker_brush, 0.8, None::<&ID2D1StrokeStyle>);
-            } else {
-                target.FillRoundedRectangle(&marker, marker_brush);
-            }
-        }
-    }
-    unsafe {
-        draw_text(
-            target,
-            plan,
-            rect(x + 31.0, y - 1.0, x + width - 7.0, y + 33.0),
-            &formats.badge,
-            if theme.high_contrast || tier <= 1 { &brushes.text } else { &chip_foreground },
-        );
     }
     Ok(())
-}
-
-fn plan_badge_tier(plan_type: Option<&str>) -> u8 {
-    match plan_type.map(str::to_ascii_lowercase).as_deref() {
-        Some("free") => 1_u8,
-        Some("go") => 2,
-        Some("plus") => 3,
-        Some("prolite") => 4,
-        Some("pro") => 5,
-        _ => 0,
-    }
 }
 
 fn draw_footer_content(
@@ -1364,13 +1223,11 @@ fn draw_footer_content(
     locale: Locale,
 ) {
     let footer_brush = if state.error.is_some() { &brushes.error } else { &brushes.muted };
-    let dot_brush = if state.error.is_some() { &brushes.error } else { &brushes.accent };
     unsafe {
-        target.FillEllipse(&ellipse(24.0, 411.0, 3.0), dot_brush);
         draw_text(
             target,
             &footer_text(state, locale),
-            rect(34.0, 395.0, 402.0, 426.0),
+            rect(32.0, 390.0, 402.0, 429.0),
             &formats.footer,
             footer_brush,
         );
@@ -1397,18 +1254,37 @@ unsafe fn draw_text(
     };
 }
 
-fn text_width(
+fn draw_tabular_text(
+    target: &ID2D1DeviceContext,
     factory: &IDWriteFactory,
+    formats: &FormatSet,
     value: &str,
+    area: D2D_RECT_F,
     format: &IDWriteTextFormat,
-    max_width: f32,
-    max_height: f32,
-) -> Result<f32> {
+    brush: &ID2D1SolidColorBrush,
+) -> Result<()> {
     let text: Vec<u16> = value.encode_utf16().collect();
-    let layout = unsafe { factory.CreateTextLayout(&text, format, max_width, max_height)? };
-    let mut metrics = DWRITE_TEXT_METRICS::default();
-    unsafe { layout.GetMetrics(&mut metrics)? };
-    Ok(metrics.widthIncludingTrailingWhitespace)
+    let layout = unsafe {
+        factory.CreateTextLayout(
+            &text,
+            format,
+            (area.right - area.left).max(0.0),
+            (area.bottom - area.top).max(0.0),
+        )?
+    };
+    unsafe {
+        layout.SetTypography(
+            &formats.tabular,
+            DWRITE_TEXT_RANGE { startPosition: 0, length: text.len() as u32 },
+        )?;
+        target.DrawTextLayout(
+            Vector2 { X: area.left, Y: area.top },
+            &layout,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+    }
+    Ok(())
 }
 
 fn solid_brush(target: &ID2D1DeviceContext, value: COLORREF) -> Result<ID2D1SolidColorBrush> {
@@ -1463,6 +1339,28 @@ fn draw_blurred_mask(
         );
     }
     Ok(())
+}
+
+fn draw_spinner(
+    target: &ID2D1DeviceContext,
+    x: f32,
+    y: f32,
+    radius: f32,
+    brush: &ID2D1SolidColorBrush,
+    stroke: f32,
+) {
+    let segment_count = 10;
+    unsafe {
+        for index in 0..8 {
+            let angle = (-90.0 + index as f32 * 360.0 / segment_count as f32).to_radians();
+            let inner = Vector2 {
+                X: x + (radius - 2.5) * angle.cos(),
+                Y: y + (radius - 2.5) * angle.sin(),
+            };
+            let outer = Vector2 { X: x + radius * angle.cos(), Y: y + radius * angle.sin() };
+            target.DrawLine(inner, outer, brush, stroke, None::<&ID2D1StrokeStyle>);
+        }
+    }
 }
 
 fn draw_ring_arrow(
@@ -1602,42 +1500,6 @@ fn linear_gradient_alpha(
     }
 }
 
-fn accent_for_theme(state: &DisplayState, theme: Theme) -> COLORREF {
-    if theme.high_contrast {
-        return theme.text;
-    }
-    match state.weekly_percent() {
-        Some(value) if value < 20 => {
-            if theme.dark {
-                rgb(255, 113, 129)
-            } else {
-                rgb(218, 58, 76)
-            }
-        }
-        Some(value) if value < 50 => {
-            if theme.dark {
-                rgb(255, 193, 83)
-            } else {
-                rgb(205, 128, 15)
-            }
-        }
-        Some(_) => {
-            if theme.dark {
-                rgb(50, 238, 137)
-            } else {
-                rgb(18, 196, 105)
-            }
-        }
-        None => {
-            if theme.dark {
-                rgb(139, 157, 168)
-            } else {
-                rgb(92, 116, 128)
-            }
-        }
-    }
-}
-
 fn color(value: COLORREF) -> D2D1_COLOR_F {
     color_alpha(value, 1.0)
 }
@@ -1699,23 +1561,12 @@ mod tests {
     #[test]
     fn card_geometry_stays_inside_the_logical_surface() {
         for surface in [
-            rounded_rect(16.0, 68.0, 404.0, 282.0, 19.0),
-            rounded_rect(16.0, 298.0, 404.0, 397.0, 19.0),
+            rounded_rect(16.0, 64.0, 404.0, 385.0, 8.0),
+            rounded_rect(16.0, 315.0, 404.0, 385.0, 8.0),
         ] {
             assert!(surface.rect.left >= 0.0);
             assert!(surface.rect.right <= super::super::CARD_WIDTH as f32);
             assert!(surface.rect.bottom <= super::super::CARD_HEIGHT as f32);
         }
-    }
-
-    #[test]
-    fn plan_badge_tiers_cover_personal_plans_and_keep_unknown_fallback() {
-        assert_eq!(plan_badge_tier(Some("free")), 1);
-        assert_eq!(plan_badge_tier(Some("go")), 2);
-        assert_eq!(plan_badge_tier(Some("plus")), 3);
-        assert_eq!(plan_badge_tier(Some("prolite")), 4);
-        assert_eq!(plan_badge_tier(Some("pro")), 5);
-        assert_eq!(plan_badge_tier(Some("enterprise")), 0);
-        assert_eq!(plan_badge_tier(None), 0);
     }
 }
