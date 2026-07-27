@@ -1,4 +1,6 @@
 use crate::app_server::AppServerClient;
+#[cfg(feature = "diagnostics")]
+use crate::icon::render_bgra_with_overlay;
 use crate::icon::{OwnedIcon, ServiceOverlay, create_icon_with_overlay, tone_for_percent};
 use crate::insights::{AlertTracker, QuotaKind, analyze_window, current_cycle, evaluate_alerts};
 use crate::model::{DisplayState, QuotaSnapshot, QuotaWindow, RefreshState};
@@ -12,6 +14,8 @@ use crate::windows_helpers::{
 };
 use crate::{startup, ui, updater};
 use chrono::{DateTime, Local, Utc};
+#[cfg(feature = "diagnostics")]
+use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -45,6 +49,10 @@ use windows::Win32::UI::Shell::{
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect,
     Shell_NotifyIconW, ShellExecuteW,
 };
+#[cfg(feature = "diagnostics")]
+use windows::Win32::UI::Shell::{
+    NIN_BALLOONHIDE, NIN_BALLOONSHOW, NIN_BALLOONTIMEOUT, NIN_BALLOONUSERCLICK,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, HMENU,
@@ -59,11 +67,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
     WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
 };
+#[cfg(feature = "diagnostics")]
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetMenuItemCount, GetMenuItemID, GetMenuState, GetSubMenu, MF_BYCOMMAND,
+};
 use windows::core::{GUID, PCWSTR, w};
 
 const MAIN_CLASS: PCWSTR = w!("CodexStatus.MainWindow.v1");
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.FlyoutWindow.v1");
+#[cfg(not(feature = "diagnostics"))]
 const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D");
+#[cfg(feature = "diagnostics")]
+const MUTEX_NAME: PCWSTR =
+    w!("Local\\CodexStatus.Diagnostics.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D");
 const TRAY_GUID: GUID = GUID::from_u128(0x7a89d848_0611_4cb4_98c9_88ca9b59ff84);
 const TRAY_ID: u32 = 1;
 
@@ -73,6 +89,10 @@ const WM_SHOW_EXISTING: u32 = WM_APP + 3;
 const WM_TOGGLE_FLYOUT: u32 = WM_APP + 4;
 const WM_UPDATE_COMPLETE: u32 = WM_APP + 5;
 const WM_STATUS_COMPLETE: u32 = WM_APP + 6;
+#[cfg(feature = "diagnostics")]
+const WM_DIAGNOSTIC_COMMAND: u32 = WM_APP + 7;
+#[cfg(feature = "diagnostics")]
+const WM_DIAGNOSTIC_DUMP_MENU: u32 = WM_APP + 8;
 
 const TIMER_REFRESH: usize = 1;
 const TIMER_STARTUP: usize = 2;
@@ -296,10 +316,12 @@ pub fn run() -> Result<(), AppError> {
         None
     };
     let hotkey_failed = settings.global_hotkey && hotkey.is_none();
-    if hotkey_failed {
+    let hotkey_settings_save_error = if hotkey_failed {
         settings.global_hotkey = false;
-        let _ = store.save_settings(&settings);
-    }
+        store.save_settings(&settings).err()
+    } else {
+        None
+    };
     let state = Box::new(AppState {
         hwnd,
         flyout,
@@ -332,6 +354,14 @@ pub fn run() -> Result<(), AppError> {
     });
     let raw = Box::into_raw(state);
     STATE.with(|slot| slot.set(raw));
+    #[cfg(feature = "diagnostics")]
+    diagnostic_event(
+        "diagnostic_ready",
+        serde_json::json!({
+            "hwnd": unsafe { (*raw).hwnd.0 as isize },
+            "flyout": unsafe { (*raw).flyout.0 as isize },
+        }),
+    );
     diagnostic("run:state");
 
     let initialization = unsafe {
@@ -363,6 +393,12 @@ pub fn run() -> Result<(), AppError> {
                     "Ctrl+Alt+Q is already used by another app.",
                     "Ctrl+Alt+Q 已被其他应用占用。",
                 ),
+            );
+        }
+        if let Some(error) = hotkey_settings_save_error.as_ref() {
+            state.show_balloon(
+                state.locale.text("Settings not saved", "设置未保存"),
+                &error.to_string(),
             );
         }
         if background {
@@ -452,6 +488,20 @@ unsafe extern "system" fn main_window_proc(
             match message {
                 WM_TRAY => {
                     let event = lparam.0 as u32 & 0xffff;
+                    #[cfg(feature = "diagnostics")]
+                    diagnostic_event(
+                        "tray_callback",
+                        serde_json::json!({
+                            "event": event,
+                            "name": match event {
+                                NIN_BALLOONSHOW => "balloon_show",
+                                NIN_BALLOONHIDE => "balloon_hide",
+                                NIN_BALLOONTIMEOUT => "balloon_timeout",
+                                NIN_BALLOONUSERCLICK => "balloon_user_click",
+                                _ => "other",
+                            },
+                        }),
+                    );
                     match event {
                         WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_SELECT => {
                             state.request_toggle_flyout()
@@ -484,6 +534,22 @@ unsafe extern "system" fn main_window_proc(
                         let outcome = *Box::from_raw(lparam.0 as *mut StatusOutcome);
                         state.finish_status_check(outcome);
                     }
+                    return LRESULT(0);
+                }
+                #[cfg(feature = "diagnostics")]
+                WM_DIAGNOSTIC_COMMAND => {
+                    if let Ok(command) = u32::try_from(wparam.0) {
+                        diagnostic_event(
+                            "diagnostic_command_received",
+                            serde_json::json!({ "command": command }),
+                        );
+                        state.handle_command(command);
+                    }
+                    return LRESULT(0);
+                }
+                #[cfg(feature = "diagnostics")]
+                WM_DIAGNOSTIC_DUMP_MENU => {
+                    state.dump_menu_diagnostics();
                     return LRESULT(0);
                 }
                 WM_SHOW_EXISTING => {
@@ -753,7 +819,19 @@ impl AppState {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_STATUS);
             if self.settings.service_status_checks && !self.refresh_paused {
-                let _ = SetTimer(Some(self.hwnd), TIMER_STATUS, delay_ms.max(1_000), None);
+                let interval = delay_ms.max(1_000);
+                let timer = SetTimer(Some(self.hwnd), TIMER_STATUS, interval, None);
+                #[cfg(feature = "diagnostics")]
+                diagnostic_event(
+                    "timer",
+                    serde_json::json!({
+                        "kind": "service_status",
+                        "active": timer != 0,
+                        "interval_ms": interval,
+                    }),
+                );
+                #[cfg(not(feature = "diagnostics"))]
+                let _ = timer;
             }
         }
     }
@@ -1052,7 +1130,19 @@ impl AppState {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
             if !self.refresh_paused {
-                let _ = SetTimer(Some(self.hwnd), TIMER_REFRESH, milliseconds.max(1_000), None);
+                let interval = milliseconds.max(1_000);
+                let timer = SetTimer(Some(self.hwnd), TIMER_REFRESH, interval, None);
+                #[cfg(feature = "diagnostics")]
+                diagnostic_event(
+                    "timer",
+                    serde_json::json!({
+                        "kind": "refresh",
+                        "active": timer != 0,
+                        "interval_ms": interval,
+                    }),
+                );
+                #[cfg(not(feature = "diagnostics"))]
+                let _ = timer;
             }
         }
     }
@@ -1072,9 +1162,22 @@ impl AppState {
             } else {
                 ServiceOverlay::None
             };
+        let tone = tone_for_percent(&self.display, percent);
+        #[cfg(feature = "diagnostics")]
+        let icon_digest = {
+            let pixels = render_bgra_with_overlay(
+                percent,
+                tone,
+                service_overlay,
+                size,
+                self.theme.high_contrast,
+                self.theme.tray_dark,
+            );
+            format!("{:x}", Sha256::digest(pixels))
+        };
         let icon = create_icon_with_overlay(
             percent,
-            tone_for_percent(&self.display, percent),
+            tone,
             service_overlay,
             size,
             self.theme.high_contrast,
@@ -1093,7 +1196,20 @@ impl AppState {
         let add = force_add || !self.tray_added;
         let operation = if add { NIM_ADD } else { NIM_MODIFY };
         diagnostic(if add { "tray:add" } else { "tray:modify" });
-        if !unsafe { Shell_NotifyIconW(operation, &data) }.as_bool() {
+        let succeeded = unsafe { Shell_NotifyIconW(operation, &data) }.as_bool();
+        #[cfg(feature = "diagnostics")]
+        diagnostic_event(
+            "tray_update",
+            serde_json::json!({
+                "operation": if add { "add" } else { "modify" },
+                "success": succeeded,
+                "metric": self.settings.tray_metric,
+                "percent": percent,
+                "icon_sha256": icon_digest,
+                "tooltip": tooltip,
+            }),
+        );
+        if !succeeded {
             diagnostic("tray:failed");
             return Err(windows::core::Error::from_thread());
         }
@@ -1132,6 +1248,16 @@ impl AppState {
 
     fn show_balloon(&self, title: &str, body: &str) {
         if !self.tray_added {
+            #[cfg(feature = "diagnostics")]
+            diagnostic_event(
+                "notification",
+                serde_json::json!({
+                    "title": title,
+                    "body": body,
+                    "submitted": false,
+                    "reason": "tray_not_added",
+                }),
+            );
             return;
         }
         let mut data = self.notify_data();
@@ -1139,9 +1265,18 @@ impl AppState {
         data.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
         copy_utf16(&mut data.szInfoTitle, title);
         copy_utf16(&mut data.szInfo, body);
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
-        }
+        let submitted = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool();
+        #[cfg(feature = "diagnostics")]
+        diagnostic_event(
+            "notification",
+            serde_json::json!({
+                "title": title,
+                "body": body,
+                "submitted": submitted,
+            }),
+        );
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = submitted;
     }
 
     fn maybe_alerts(&mut self) {
@@ -1619,7 +1754,7 @@ impl AppState {
                 self.locale.text("Start with Windows", "开机自动启动"),
                 startup_enabled,
             )?;
-            append(menu, CMD_RELEASES, self.locale.text("Open releases", "查看新版本"), false)?;
+            append(menu, CMD_RELEASES, self.locale.text("Open releases", "打开发布页"), false)?;
             separator(menu)?;
             append(
                 menu,
@@ -1631,7 +1766,30 @@ impl AppState {
         Ok(menu)
     }
 
+    #[cfg(feature = "diagnostics")]
+    fn dump_menu_diagnostics(&self) {
+        match self.build_menu() {
+            Ok(menu) => unsafe {
+                diagnostic_menu_items(menu);
+                let _ = DestroyMenu(menu);
+            },
+            Err(error) => diagnostic_event(
+                "menu_dump_failed",
+                serde_json::json!({ "error": error.to_string() }),
+            ),
+        }
+    }
+
     unsafe fn handle_command(&mut self, command: u32) {
+        #[cfg(feature = "diagnostics")]
+        diagnostic_event(
+            "command_dispatch",
+            serde_json::json!({
+                "command": command,
+                "settings": self.settings,
+                "hotkey_registered": self.hotkey.is_some(),
+            }),
+        );
         unsafe {
             match command {
                 0 => {}
@@ -1642,51 +1800,61 @@ impl AppState {
                 CMD_STATUS_PAGE => self.open_url(STATUS_PAGE_HOME),
                 CMD_RELEASES => self.open_url(RELEASES_URL),
                 CMD_INTERVAL_1 | CMD_INTERVAL_5 | CMD_INTERVAL_15 => {
-                    self.settings.refresh_minutes = match command {
+                    let minutes = match command {
                         CMD_INTERVAL_1 => 1,
                         CMD_INTERVAL_15 => 15,
                         _ => 5,
                     };
-                    self.persist_settings();
-                    self.reset_refresh_timer(self.settings.refresh_minutes * 60_000);
+                    if self.update_settings(|settings| settings.refresh_minutes = minutes) {
+                        self.reset_refresh_timer(minutes * 60_000);
+                    }
                 }
                 CMD_ALERT_OFF | CMD_ALERT_10 | CMD_ALERT_20 | CMD_ALERT_30 => {
-                    self.settings.alert_threshold = match command {
+                    let threshold = match command {
                         CMD_ALERT_10 => Some(10),
                         CMD_ALERT_20 => Some(20),
                         CMD_ALERT_30 => Some(30),
                         _ => None,
                     };
-                    self.settings.last_alert_reset = None;
-                    self.alert_tracker.weekly.low_alerted_cycle = None;
-                    self.persist_settings();
-                    self.maybe_alerts();
+                    let mut changed = self.settings.clone();
+                    if set_alert_threshold(&mut changed, QuotaKind::Weekly, threshold)
+                        && self.update_settings(|settings| *settings = changed)
+                    {
+                        self.alert_tracker.weekly.low_alerted_cycle = None;
+                        self.maybe_alerts();
+                    }
                 }
                 CMD_SESSION_ALERT_OFF
                 | CMD_SESSION_ALERT_10
                 | CMD_SESSION_ALERT_20
                 | CMD_SESSION_ALERT_30 => {
-                    self.settings.session_alert_threshold = match command {
+                    let threshold = match command {
                         CMD_SESSION_ALERT_10 => Some(10),
                         CMD_SESSION_ALERT_20 => Some(20),
                         CMD_SESSION_ALERT_30 => Some(30),
                         _ => None,
                     };
-                    self.settings.last_session_alert_reset = None;
-                    self.alert_tracker.session.low_alerted_cycle = None;
-                    self.persist_settings();
-                    self.maybe_alerts();
+                    let mut changed = self.settings.clone();
+                    if set_alert_threshold(&mut changed, QuotaKind::Session, threshold)
+                        && self.update_settings(|settings| *settings = changed)
+                    {
+                        self.alert_tracker.session.low_alerted_cycle = None;
+                        self.maybe_alerts();
+                    }
                 }
                 CMD_PACE_ALERTS => {
-                    self.settings.pace_alerts = !self.settings.pace_alerts;
-                    self.settings.last_weekly_pace_alert_reset = None;
-                    self.settings.last_session_pace_alert_reset = None;
-                    self.persist_settings();
-                    self.maybe_alerts();
+                    let enabled = !self.settings.pace_alerts;
+                    if self.update_settings(|settings| {
+                        settings.pace_alerts = enabled;
+                        settings.last_weekly_pace_alert_reset = None;
+                        settings.last_session_pace_alert_reset = None;
+                    }) {
+                        self.maybe_alerts();
+                    }
                 }
                 CMD_RECOVERY_ALERTS => {
-                    self.settings.recovery_alerts = !self.settings.recovery_alerts;
-                    self.persist_settings();
+                    let enabled = !self.settings.recovery_alerts;
+                    self.update_settings(|settings| settings.recovery_alerts = enabled);
                 }
                 CMD_TEST_NOTIFICATION => self.show_balloon(
                     self.locale.text("CodexStatus notification", "CodexStatus 通知"),
@@ -1696,39 +1864,55 @@ impl AppState {
                     ),
                 ),
                 CMD_TRAY_WEEKLY | CMD_TRAY_SESSION | CMD_TRAY_LOWEST => {
-                    self.settings.tray_metric = match command {
+                    let metric = match command {
                         CMD_TRAY_SESSION => "session",
                         CMD_TRAY_LOWEST => "lowest",
                         _ => "weekly",
                     }
                     .to_owned();
-                    self.persist_settings();
-                    let _ = self.update_tray(false);
+                    if self.update_settings(|settings| settings.tray_metric = metric) {
+                        self.update_tray_after_command();
+                    }
                 }
                 CMD_STATUS_CHECKS => {
-                    self.settings.service_status_checks = !self.settings.service_status_checks;
-                    self.persist_settings();
-                    if self.settings.service_status_checks {
-                        self.reset_status_timer(1_000);
-                    } else {
-                        let _ = KillTimer(Some(self.hwnd), TIMER_STATUS);
-                        self.service_status = ServiceStatusSnapshot::unavailable();
-                        let _ = self.update_tray(false);
-                        let _ = InvalidateRect(Some(self.flyout), None, false);
+                    let enabled = !self.settings.service_status_checks;
+                    if self.update_settings(|settings| settings.service_status_checks = enabled) {
+                        if enabled {
+                            self.reset_status_timer(1_000);
+                        } else {
+                            let stopped = KillTimer(Some(self.hwnd), TIMER_STATUS).is_ok();
+                            #[cfg(feature = "diagnostics")]
+                            diagnostic_event(
+                                "timer",
+                                serde_json::json!({
+                                    "kind": "service_status",
+                                    "active": false,
+                                    "stop_succeeded": stopped,
+                                }),
+                            );
+                            #[cfg(not(feature = "diagnostics"))]
+                            let _ = stopped;
+                            self.service_status = ServiceStatusSnapshot::unavailable();
+                            self.update_tray_after_command();
+                            let _ = InvalidateRect(Some(self.flyout), None, false);
+                        }
                     }
                 }
                 CMD_GLOBAL_HOTKEY => self.toggle_global_hotkey(),
                 CMD_PIN_FLYOUT => {
-                    self.settings.flyout_pinned = !self.settings.flyout_pinned;
-                    self.persist_settings();
-                    let _ = InvalidateRect(Some(self.flyout), None, false);
+                    let pinned = !self.settings.flyout_pinned;
+                    if self.update_settings(|settings| settings.flyout_pinned = pinned) {
+                        let _ = InvalidateRect(Some(self.flyout), None, false);
+                    }
                 }
                 CMD_STARTUP => {
-                    let result = if startup::is_enabled() {
-                        startup::disable()
-                    } else {
-                        std::env::current_exe().and_then(|path| startup::enable(&path))
-                    };
+                    let result = std::env::current_exe().and_then(|path| {
+                        if startup::is_enabled_for(&path) {
+                            startup::disable()
+                        } else {
+                            startup::enable(&path)
+                        }
+                    });
                     if let Err(error) = result {
                         self.show_balloon(
                             self.locale.text("Startup setting failed", "开机启动设置失败"),
@@ -1737,17 +1921,18 @@ impl AppState {
                     }
                 }
                 CMD_THEME_SYSTEM | CMD_THEME_LIGHT | CMD_THEME_DARK => {
-                    self.settings.theme = match command {
+                    let theme = match command {
                         CMD_THEME_LIGHT => "light",
                         CMD_THEME_DARK => "dark",
                         _ => "system",
                     }
                     .to_owned();
-                    self.persist_settings();
-                    self.theme = ui::detect_theme(&self.settings.theme);
-                    ui::configure_flyout(self.flyout, self.theme);
-                    let _ = self.update_tray(false);
-                    let _ = InvalidateRect(Some(self.flyout), None, true);
+                    if self.update_settings(|settings| settings.theme = theme) {
+                        self.theme = ui::detect_theme(&self.settings.theme);
+                        ui::configure_flyout(self.flyout, self.theme);
+                        self.update_tray_after_command();
+                        let _ = InvalidateRect(Some(self.flyout), None, true);
+                    }
                 }
                 CMD_EXIT => {
                     let _ = DestroyWindow(self.hwnd);
@@ -1755,17 +1940,106 @@ impl AppState {
                 _ => {}
             }
         }
+        #[cfg(feature = "diagnostics")]
+        diagnostic_event(
+            "command_complete",
+            serde_json::json!({
+                "command": command,
+                "settings": self.settings,
+                "hotkey_registered": self.hotkey.is_some(),
+                "refreshing": self.refreshing,
+                "tray_added": self.tray_added,
+            }),
+        );
     }
 
-    fn persist_settings(&self) {
-        let _ = self.store.save_settings(&self.settings);
+    fn persist_settings(&self) -> bool {
+        let result = self.store.save_settings(&self.settings);
+        #[cfg(feature = "diagnostics")]
+        match &result {
+            Ok(()) => diagnostic_event("settings_saved", serde_json::json!({ "success": true })),
+            Err(error) => diagnostic_event(
+                "settings_saved",
+                serde_json::json!({ "success": false, "error": error.to_string() }),
+            ),
+        }
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = &result;
+        if let Err(error) = &result {
+            self.show_balloon(
+                self.locale.text("Settings not saved", "设置未保存"),
+                &error.to_string(),
+            );
+        }
+        result.is_ok()
+    }
+
+    fn update_settings(&mut self, update: impl FnOnce(&mut Settings)) -> bool {
+        let result = save_settings_change(&self.store, &mut self.settings, update);
+        #[cfg(feature = "diagnostics")]
+        match &result {
+            Ok(()) => diagnostic_event("settings_saved", serde_json::json!({ "success": true })),
+            Err(error) => diagnostic_event(
+                "settings_saved",
+                serde_json::json!({ "success": false, "error": error.to_string() }),
+            ),
+        }
+        if let Err(error) = &result {
+            self.show_balloon(
+                self.locale.text("Settings not saved", "设置未保存"),
+                &error.to_string(),
+            );
+        }
+        result.is_ok()
+    }
+
+    fn update_tray_after_command(&mut self) {
+        if let Err(error) = self.update_tray(false) {
+            self.show_balloon(
+                self.locale.text("Tray update failed", "托盘更新失败"),
+                &error.to_string(),
+            );
+        }
     }
 
     fn toggle_global_hotkey(&mut self) {
-        if self.hotkey.is_some() {
-            self.hotkey.take();
-            self.settings.global_hotkey = false;
-            self.persist_settings();
+        if let Some(mut registration) = self.hotkey.take() {
+            if let Err(error) = registration.unregister() {
+                #[cfg(feature = "diagnostics")]
+                diagnostic_event(
+                    "hotkey_registration",
+                    serde_json::json!({
+                        "action": "unregister",
+                        "success": false,
+                        "error": error.to_string(),
+                    }),
+                );
+                self.hotkey = Some(registration);
+                self.show_balloon(
+                    self.locale.text("Shortcut setting failed", "快捷键设置失败"),
+                    &error.to_string(),
+                );
+                return;
+            }
+            #[cfg(feature = "diagnostics")]
+            diagnostic_event(
+                "hotkey_registration",
+                serde_json::json!({ "action": "unregister", "success": true }),
+            );
+            if !self.update_settings(|settings| settings.global_hotkey = false) {
+                match HotKeyRegistration::register(
+                    Some(self.hwnd),
+                    GLOBAL_HOTKEY_ID,
+                    MOD_ALT | MOD_CONTROL | MOD_NOREPEAT,
+                    u32::from(b'Q'),
+                ) {
+                    Ok(registration) => self.hotkey = Some(registration),
+                    Err(error) => self.show_balloon(
+                        self.locale.text("Shortcut setting failed", "快捷键设置失败"),
+                        &error.to_string(),
+                    ),
+                }
+            }
             return;
         }
 
@@ -1776,31 +2050,68 @@ impl AppState {
             u32::from(b'Q'),
         ) {
             Ok(registration) => {
-                self.hotkey = Some(registration);
-                self.settings.global_hotkey = true;
-                self.persist_settings();
+                #[cfg(feature = "diagnostics")]
+                diagnostic_event(
+                    "hotkey_registration",
+                    serde_json::json!({ "action": "register", "success": true }),
+                );
+                if self.update_settings(|settings| settings.global_hotkey = true) {
+                    self.hotkey = Some(registration);
+                }
             }
-            Err(_) => self.show_balloon(
-                self.locale.text("Shortcut unavailable", "快捷键不可用"),
-                self.locale.text(
-                    "Ctrl+Alt+Q is already used by another app.",
-                    "Ctrl+Alt+Q 已被其他应用占用。",
-                ),
-            ),
+            Err(error) => {
+                #[cfg(feature = "diagnostics")]
+                diagnostic_event(
+                    "hotkey_registration",
+                    serde_json::json!({
+                        "action": "register",
+                        "success": false,
+                        "error": error.to_string(),
+                    }),
+                );
+                #[cfg(not(feature = "diagnostics"))]
+                let _ = &error;
+                self.show_balloon(
+                    self.locale.text("Shortcut unavailable", "快捷键不可用"),
+                    self.locale.text(
+                        "Ctrl+Alt+Q is already used by another app.",
+                        "Ctrl+Alt+Q 已被其他应用占用。",
+                    ),
+                );
+            }
         }
     }
 
     fn copy_to_clipboard(&self, text: &str) {
         match write_unicode_text(self.hwnd, text) {
-            Ok(()) => self.show_balloon(
-                self.locale.text("Copied", "已复制"),
-                self.locale.text("Copied to the clipboard.", "内容已复制到剪贴板。"),
-            ),
-            Err(_) => self.show_balloon(
-                self.locale.text("Could not copy", "复制失败"),
-                self.locale
-                    .text("The clipboard is busy. Please try again.", "剪贴板正忙，请稍后重试。"),
-            ),
+            Ok(()) => {
+                #[cfg(feature = "diagnostics")]
+                diagnostic_event("clipboard", serde_json::json!({ "success": true, "text": text }));
+                self.show_balloon(
+                    self.locale.text("Copied", "已复制"),
+                    self.locale.text("Copied to the clipboard.", "内容已复制到剪贴板。"),
+                );
+            }
+            Err(error) => {
+                #[cfg(feature = "diagnostics")]
+                diagnostic_event(
+                    "clipboard",
+                    serde_json::json!({
+                        "success": false,
+                        "error": error.to_string(),
+                        "attempted_text": text,
+                    }),
+                );
+                #[cfg(not(feature = "diagnostics"))]
+                let _ = error;
+                self.show_balloon(
+                    self.locale.text("Could not copy", "复制失败"),
+                    self.locale.text(
+                        "The clipboard is busy. Please try again.",
+                        "剪贴板正忙，请稍后重试。",
+                    ),
+                );
+            }
         }
     }
 
@@ -1878,6 +2189,13 @@ impl AppState {
     }
 
     fn open_url(&self, url: &str) {
+        #[cfg(feature = "diagnostics")]
+        {
+            diagnostic_event("url_requested", serde_json::json!({ "url": url }));
+            if std::env::var_os("CODEX_STATUS_DIAGNOSTIC_SUPPRESS_SHELL").is_some() {
+                return;
+            }
+        }
         let url = wide0(url);
         let result = unsafe {
             ShellExecuteW(
@@ -1895,6 +2213,60 @@ impl AppState {
                 self.locale
                     .text("Copy the link from the project README.", "请从项目 README 复制链接。"),
             );
+        }
+    }
+}
+
+fn save_settings_change(
+    store: &AppStore,
+    settings: &mut Settings,
+    update: impl FnOnce(&mut Settings),
+) -> std::io::Result<()> {
+    let previous = settings.clone();
+    update(settings);
+    if let Err(error) = store.save_settings(settings) {
+        *settings = previous;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn set_alert_threshold(settings: &mut Settings, kind: QuotaKind, threshold: Option<u8>) -> bool {
+    let (current, last_reset) = match kind {
+        QuotaKind::Weekly => (&mut settings.alert_threshold, &mut settings.last_alert_reset),
+        QuotaKind::Session => {
+            (&mut settings.session_alert_threshold, &mut settings.last_session_alert_reset)
+        }
+    };
+    if *current == threshold {
+        return false;
+    }
+    *current = threshold;
+    *last_reset = None;
+    true
+}
+
+#[cfg(feature = "diagnostics")]
+unsafe fn diagnostic_menu_items(menu: HMENU) {
+    unsafe {
+        let count = GetMenuItemCount(Some(menu));
+        for position in 0..count {
+            let command = GetMenuItemID(menu, position);
+            if command != u32::MAX && command != 0 {
+                let state = GetMenuState(menu, command, MF_BYCOMMAND);
+                diagnostic_event(
+                    "menu_item",
+                    serde_json::json!({
+                        "command": command,
+                        "checked": state & MF_CHECKED.0 != 0,
+                        "enabled": state & (MF_DISABLED.0 | MF_GRAYED.0) == 0,
+                    }),
+                );
+            }
+            let submenu = GetSubMenu(menu, position);
+            if !submenu.0.is_null() {
+                diagnostic_menu_items(submenu);
+            }
         }
     }
 }
@@ -2070,16 +2442,29 @@ fn friendly_error(error: &str, locale: ui::Locale) -> String {
 
 #[cfg(feature = "diagnostics")]
 fn diagnostic(stage: &str) {
-    use std::io::Write;
-    eprintln!("{stage}");
-    let path = std::env::temp_dir().join("CodexStatus-diagnostic.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{} {stage}", Utc::now().to_rfc3339());
-    }
+    diagnostic_event("stage", serde_json::json!({ "name": stage }));
 }
 
 #[cfg(not(feature = "diagnostics"))]
 fn diagnostic(_stage: &str) {}
+
+#[cfg(feature = "diagnostics")]
+fn diagnostic_event(event: &str, details: serde_json::Value) {
+    use std::io::Write;
+
+    let record = serde_json::json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "event": event,
+        "details": details,
+    });
+    eprintln!("{record}");
+    let path = std::env::var_os("CODEX_STATUS_DIAGNOSTIC_LOG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("CodexStatus-diagnostic.jsonl"));
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{record}");
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2137,5 +2522,39 @@ mod tests {
         let line = quota_status_line(QuotaKind::Session, None, ui::Locale::Chinese);
         assert_eq!(line, "5 小时额度: --");
         assert_eq!(format_local_time(i64::MAX, ui::Locale::English), "--");
+    }
+
+    #[test]
+    fn failed_settings_change_rolls_back_memory_state() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let blocker = std::env::temp_dir().join(format!("codex-status-blocker-{suffix}"));
+        fs::write(&blocker, b"not a directory").unwrap();
+        let store = AppStore::at(blocker.join("settings-root"));
+        let mut settings = Settings::default();
+
+        let result = save_settings_change(&store, &mut settings, |value| value.refresh_minutes = 1);
+
+        assert!(result.is_err());
+        assert_eq!(settings, Settings::default());
+        fs::remove_file(blocker).unwrap();
+    }
+
+    #[test]
+    fn reselecting_an_alert_threshold_keeps_duplicate_suppression() {
+        let mut settings = Settings {
+            alert_threshold: Some(30),
+            last_alert_reset: Some(123),
+            ..Settings::default()
+        };
+
+        assert!(!set_alert_threshold(&mut settings, QuotaKind::Weekly, Some(30)));
+        assert_eq!(settings.last_alert_reset, Some(123));
+
+        assert!(set_alert_threshold(&mut settings, QuotaKind::Weekly, Some(20)));
+        assert_eq!(settings.alert_threshold, Some(20));
+        assert_eq!(settings.last_alert_reset, None);
     }
 }

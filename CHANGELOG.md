@@ -2,6 +2,14 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [Unreleased]
+
+- Save tray menu settings as a transaction: a failed write now rolls the setting back, skips the runtime side effect, and reports the failure, instead of leaving memory and disk disagreeing until the next restart.
+- Validate the startup registry entry against the current executable, so a stale or broken path is no longer reported as enabled and can be repaired by selecting the item again.
+- Stop reselecting the current alert threshold from clearing the deduplication state and re-firing an alert that was already delivered.
+- Surface previously silent failures when unregistering the global shortcut, saving the shortcut at startup, and redrawing the tray icon on request.
+- Rename the releases menu item to describe what it does; it opens the releases page and never checked for a new version.
+
 ## [0.5.0] - 2026-07-28
 
 - Move the flyout from `ID2D1HwndRenderTarget` to D3D11, an `ID2D1DeviceContext`, and a premultiplied DirectComposition swapchain, with grayscale-antialiased text on transparent surfaces.
