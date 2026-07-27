@@ -145,8 +145,10 @@ fn render_rgba(
     }
 
     let accent = tone.accent(high_contrast, dark_taskbar);
-    for x in 1..size.saturating_sub(1) {
-        set_pixel(&mut pixels, size, x as i32, size as i32 - 1, accent);
+    for y in size.saturating_sub(2)..size {
+        for x in 1..size.saturating_sub(1) {
+            set_pixel(&mut pixels, size, x as i32, y as i32, accent);
+        }
     }
     draw_service_overlay(&mut pixels, size, overlay, high_contrast, dark_taskbar);
     pixels
@@ -478,13 +480,15 @@ mod tests {
     }
 
     #[test]
-    fn status_color_is_a_single_bottom_rule() {
+    fn status_color_is_a_two_pixel_bottom_rule() {
         let pixels =
             render_rgba(Some(50), IconTone::Healthy, ServiceOverlay::None, 16, false, false);
         let accent = IconTone::Healthy.accent(false, false);
-        assert_eq!(pixels[15 * 16], [0, 0, 0, 0]);
-        assert!(pixels[15 * 16 + 1..15 * 16 + 15].iter().all(|pixel| *pixel == accent));
-        assert_eq!(pixels[15 * 16 + 15], [0, 0, 0, 0]);
+        for y in [14, 15] {
+            assert_eq!(pixels[y * 16], [0, 0, 0, 0]);
+            assert!(pixels[y * 16 + 1..y * 16 + 15].iter().all(|pixel| *pixel == accent));
+            assert_eq!(pixels[y * 16 + 15], [0, 0, 0, 0]);
+        }
     }
 
     #[test]
@@ -500,7 +504,8 @@ mod tests {
         let accent = IconTone::Healthy.accent(false, false);
         let accent_bgra = [accent[2], accent[1], accent[0], accent[3]];
         let pixel = |x: usize, y: usize| &pixels[(y * 16 + x) * 4..][..4];
-        assert_ne!(pixel(8, 0), accent_bgra);
+        assert_ne!(pixel(8, 13), accent_bgra);
+        assert_eq!(pixel(8, 14), accent_bgra);
         assert_eq!(pixel(8, 15), accent_bgra);
     }
 

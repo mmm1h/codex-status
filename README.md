@@ -28,6 +28,7 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 - Five-minute default refresh, manual refresh, bounded failure backoff, safe cache expiry, and optional low-quota alerts.
 - Weekly and five-hour alert thresholds, projected-exhaustion warnings, recovery alerts, and a built-in notification test.
 - Weekly, five-hour, or lowest-of-both tray display; the details card hides unavailable windows instead of inventing values.
+- Reset-credit availability includes the nearest expiration time when Codex provides it in the existing rate-limit response.
 - Optional official OpenAI status checks, copyable status/diagnostics, a pinnable card, and a `Ctrl+Alt+Q` shortcut.
 - Quota and service checks pause while Windows is locked or asleep and resume with one fresh read.
 - Single instance, Explorer-restart recovery, multi-monitor placement, and optional start with Windows.

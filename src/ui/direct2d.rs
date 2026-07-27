@@ -10,8 +10,8 @@
 //! no randomized composition was used.
 
 use super::{
-    Locale, Theme, UsageProjection, footer_text, plan_label, projection_label, reset_details, rgb,
-    updated_text, weekly_usage_projection,
+    Locale, Theme, UsageProjection, footer_text, plan_label, projection_label, reset_credit_detail,
+    reset_details, rgb, updated_text, weekly_usage_projection,
 };
 use crate::insights::analyze_window;
 use crate::model::DisplayState;
@@ -504,6 +504,7 @@ struct FormatSet {
     pace: IDWriteTextFormat,
     metric_label: IDWriteTextFormat,
     metric_value: IDWriteTextFormat,
+    metric_detail: IDWriteTextFormat,
     badge: IDWriteTextFormat,
     footer: IDWriteTextFormat,
 }
@@ -599,6 +600,15 @@ impl FormatSet {
                 locale,
                 27.0,
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+                true,
+            )?,
+            metric_detail: make_format(
+                factory,
+                family,
+                locale,
+                10.0,
+                DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
                 true,
             )?,
@@ -1161,6 +1171,8 @@ fn draw_metrics_content(
         .and_then(|snapshot| snapshot.account.reset_credits)
         .map(|credits| format!("{credits} {}", locale.text("resets", "次")))
         .unwrap_or_else(|| "--".to_owned());
+    let credit_detail =
+        state.snapshot.as_ref().and_then(|snapshot| reset_credit_detail(&snapshot.account, locale));
 
     if let Some(session) = session {
         draw_plan_metric(
@@ -1168,7 +1180,7 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(17.0, 295.0, 146.0, 389.0),
+            rect(17.0, 295.0, 134.0, 389.0),
             plan_type,
             &plan,
             theme,
@@ -1177,17 +1189,19 @@ fn draw_metrics_content(
             target,
             formats,
             brushes,
-            rect(147.0, 295.0, 274.0, 389.0),
+            rect(135.0, 295.0, 251.0, 389.0),
             locale.text("5-hour", "5 小时"),
             &session,
+            None,
         );
         draw_metric(
             target,
             formats,
             brushes,
-            rect(275.0, 295.0, 403.0, 389.0),
+            rect(252.0, 295.0, 403.0, 389.0),
             locale.text("Reset credits", "重置机会"),
             &credits,
+            credit_detail.as_deref(),
         );
     } else {
         draw_plan_metric(
@@ -1207,6 +1221,7 @@ fn draw_metrics_content(
             rect(221.0, 295.0, 403.0, 389.0),
             locale.text("Reset credits", "重置机会"),
             &credits,
+            credit_detail.as_deref(),
         );
         draw_ring_arrow(target, 371.0, 351.0, 10.5, &brushes.muted, 2.0)?;
     }
@@ -1220,22 +1235,32 @@ fn draw_metric(
     area: D2D_RECT_F,
     label: &str,
     value: &str,
+    detail: Option<&str>,
 ) {
     unsafe {
         draw_text(
             target,
             label,
-            rect(area.left + 17.0, area.top + 9.0, area.right - 13.0, area.top + 43.0),
+            rect(area.left + 17.0, area.top + 6.0, area.right - 13.0, area.top + 32.0),
             &formats.metric_label,
             &brushes.muted,
         );
         draw_text(
             target,
             value,
-            rect(area.left + 17.0, area.top + 42.0, area.right - 13.0, area.bottom - 8.0),
+            rect(area.left + 17.0, area.top + 31.0, area.right - 13.0, area.top + 68.0),
             &formats.metric_value,
             &brushes.text,
         );
+        if let Some(detail) = detail {
+            draw_text(
+                target,
+                detail,
+                rect(area.left + 17.0, area.top + 67.0, area.right - 13.0, area.bottom - 4.0),
+                &formats.metric_detail,
+                &brushes.muted,
+            );
+        }
     }
 }
 
@@ -1254,7 +1279,7 @@ fn draw_plan_metric(
         draw_text(
             target,
             if formats.locale == Locale::Chinese { "套餐" } else { "Plan" },
-            rect(area.left + 17.0, area.top + 8.0, area.right - 13.0, area.top + 41.0),
+            rect(area.left + 17.0, area.top + 6.0, area.right - 13.0, area.top + 32.0),
             &formats.metric_label,
             &brushes.muted,
         );
@@ -1267,7 +1292,7 @@ fn draw_plan_metric(
         plan_type,
         plan,
         area.left + 17.0,
-        area.top + 43.0,
+        area.top + 34.0,
         (area.right - area.left - 34.0).max(58.0),
         theme,
     )

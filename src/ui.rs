@@ -1,5 +1,5 @@
 use crate::insights::analyze_window;
-use crate::model::{DisplayState, QuotaWindow, RefreshState};
+use crate::model::{AccountSummary, DisplayState, QuotaWindow, RefreshState};
 use chrono::{DateTime, Local};
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -507,6 +507,10 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
             .and_then(|snapshot| snapshot.account.reset_credits)
             .map(|credits| format!("{credits} {}", locale.text("resets", "次")))
             .unwrap_or_else(|| "--".to_owned());
+        let credit_detail = state
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| reset_credit_detail(&snapshot.account, locale));
 
         let metrics = RECT {
             left: scale(16, dpi),
@@ -516,33 +520,38 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
         };
         outlined_surface(hdc, metrics, scale(19, dpi), theme.surface_alt, theme.line, dpi);
         if let Some(session) = session {
-            for divider in [scale(146, dpi), scale(274, dpi)] {
+            for divider in [scale(134, dpi), scale(251, dpi)] {
                 draw_metric_divider(hdc, metrics, divider, theme, dpi);
             }
             metric_column(
                 hdc,
                 locale,
-                RECT { right: scale(146, dpi), ..metrics },
-                locale.text("Plan", "套餐"),
-                &plan,
+                RECT { right: scale(134, dpi), ..metrics },
+                MetricContent { label: locale.text("Plan", "套餐"), value: &plan, detail: None },
                 theme,
                 dpi,
             );
             metric_column(
                 hdc,
                 locale,
-                RECT { left: scale(147, dpi), right: scale(274, dpi), ..metrics },
-                locale.text("5-hour", "5 小时"),
-                &session,
+                RECT { left: scale(135, dpi), right: scale(251, dpi), ..metrics },
+                MetricContent {
+                    label: locale.text("5-hour", "5 小时"),
+                    value: &session,
+                    detail: None,
+                },
                 theme,
                 dpi,
             );
             metric_column(
                 hdc,
                 locale,
-                RECT { left: scale(275, dpi), ..metrics },
-                locale.text("Reset credits", "重置机会"),
-                &credits,
+                RECT { left: scale(252, dpi), ..metrics },
+                MetricContent {
+                    label: locale.text("Reset credits", "重置机会"),
+                    value: &credits,
+                    detail: credit_detail.as_deref(),
+                },
                 theme,
                 dpi,
             );
@@ -553,8 +562,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 hdc,
                 locale,
                 RECT { right: divider, ..metrics },
-                locale.text("Plan", "套餐"),
-                &plan,
+                MetricContent { label: locale.text("Plan", "套餐"), value: &plan, detail: None },
                 theme,
                 dpi,
             );
@@ -562,8 +570,11 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 hdc,
                 locale,
                 RECT { left: divider + scale(1, dpi), ..metrics },
-                locale.text("Reset credits", "重置机会"),
-                &credits,
+                MetricContent {
+                    label: locale.text("Reset credits", "重置机会"),
+                    value: &credits,
+                    detail: credit_detail.as_deref(),
+                },
                 theme,
                 dpi,
             );
@@ -714,12 +725,17 @@ unsafe fn draw_percentage(
     }
 }
 
+struct MetricContent<'a> {
+    label: &'a str,
+    value: &'a str,
+    detail: Option<&'a str>,
+}
+
 unsafe fn metric_column(
     hdc: HDC,
     locale: Locale,
     rect: RECT,
-    label: &str,
-    value: &str,
+    content: MetricContent<'_>,
     theme: Theme,
     dpi: u32,
 ) {
@@ -727,12 +743,12 @@ unsafe fn metric_column(
         draw_text(
             hdc,
             locale,
-            label,
+            content.label,
             RECT {
                 left: rect.left + scale(12, dpi),
-                top: rect.top + scale(9, dpi),
+                top: rect.top + scale(6, dpi),
                 right: rect.right - scale(10, dpi),
-                bottom: rect.top + scale(43, dpi),
+                bottom: rect.top + scale(32, dpi),
             },
             scale(14, dpi),
             FW_NORMAL.0 as i32,
@@ -741,17 +757,33 @@ unsafe fn metric_column(
         draw_text(
             hdc,
             locale,
-            value,
+            content.value,
             RECT {
                 left: rect.left + scale(12, dpi),
-                top: rect.top + scale(42, dpi),
+                top: rect.top + scale(31, dpi),
                 right: rect.right - scale(10, dpi),
-                bottom: rect.bottom - scale(8, dpi),
+                bottom: rect.top + scale(68, dpi),
             },
             scale(26, dpi),
             FW_SEMIBOLD.0 as i32,
             theme.text,
         );
+        if let Some(detail) = content.detail {
+            draw_text(
+                hdc,
+                locale,
+                detail,
+                RECT {
+                    left: rect.left + scale(12, dpi),
+                    top: rect.top + scale(67, dpi),
+                    right: rect.right - scale(10, dpi),
+                    bottom: rect.bottom - scale(4, dpi),
+                },
+                scale(10, dpi),
+                FW_NORMAL.0 as i32,
+                theme.muted,
+            );
+        }
     }
 }
 
@@ -894,6 +926,23 @@ fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
         .map(|time| time.with_timezone(&Local).format("%m/%d %H:%M").to_string())
         .unwrap_or_else(|| "--".to_owned());
     (countdown, local_time)
+}
+
+pub(super) fn reset_credit_detail(account: &AccountSummary, locale: Locale) -> Option<String> {
+    match account.reset_credits {
+        Some(0) => Some(locale.text("No reset credits available", "暂无可用重置券").to_owned()),
+        Some(_) => account.reset_credit_expires_at.and_then(|expires_at| {
+            DateTime::from_timestamp(expires_at, 0).map(|time| {
+                let time = time.with_timezone(&Local);
+                if locale == Locale::Chinese {
+                    format!("最近到期 {}", time.format("%-m月%-d日 %H:%M:%S"))
+                } else {
+                    format!("Expires {}", time.format("%m/%d %H:%M:%S"))
+                }
+            })
+        }),
+        None => None,
+    }
 }
 
 pub(crate) fn plan_label(plan: &str, locale: Locale) -> &str {
@@ -1091,6 +1140,40 @@ mod tests {
         };
         let (countdown, _) = reset_details(&window, Locale::English);
         assert!(!countdown.contains('-'));
+    }
+
+    #[test]
+    fn formats_the_nearest_reset_credit_expiration_with_seconds() {
+        use chrono::TimeZone;
+
+        let expires_at = Local.with_ymd_and_hms(2026, 8, 1, 3, 8, 34).single().unwrap().timestamp();
+        let account = AccountSummary {
+            reset_credits: Some(2),
+            reset_credit_expires_at: Some(expires_at),
+            ..AccountSummary::default()
+        };
+
+        assert_eq!(
+            reset_credit_detail(&account, Locale::Chinese).as_deref(),
+            Some("最近到期 8月1日 03:08:34")
+        );
+        assert_eq!(
+            reset_credit_detail(&account, Locale::English).as_deref(),
+            Some("Expires 08/01 03:08:34")
+        );
+    }
+
+    #[test]
+    fn labels_the_no_reset_credit_state_without_an_expiration() {
+        let account = AccountSummary { reset_credits: Some(0), ..AccountSummary::default() };
+        assert_eq!(
+            reset_credit_detail(&account, Locale::Chinese).as_deref(),
+            Some("暂无可用重置券")
+        );
+        assert_eq!(
+            reset_credit_detail(&account, Locale::English).as_deref(),
+            Some("No reset credits available")
+        );
     }
 
     #[test]

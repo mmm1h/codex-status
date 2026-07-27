@@ -11,6 +11,7 @@ All notable changes to CodexStatus are documented here.
 - Add CodexStatus-designed Free, Go, Plus, 5x Pro, and 20x Pro plan badges whose shapes and tier marks communicate level without relying on color alone; these are not official OpenAI assets.
 - Read the plan identity from the Codex rate-limit bucket before the broader account token, so multiplier-specific tiers are labelled correctly.
 - State the projected weekly depletion time on the pace line when usage is clearly ahead of pace, keeping the local-read privacy note in the footer.
+- Show the nearest available reset-credit expiration from the existing rate-limit response, and thicken the tray status rule to two pixels without turning it back into a progress bar.
 - Keep flyout graphics devices available for quick reopening, then release the complete graphics stack after more than three minutes of inactivity.
 - Extend the existing `windows` crate feature set for Direct3D 11, DXGI, and DirectComposition without adding a new third-party crate.
 

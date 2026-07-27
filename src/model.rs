@@ -31,6 +31,7 @@ impl QuotaWindow {
 pub struct AccountSummary {
     pub plan_type: Option<String>,
     pub reset_credits: Option<u64>,
+    pub reset_credit_expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -148,11 +149,25 @@ pub fn parse_snapshot(
         .map(str::to_owned);
     let reset_credits =
         rate_result.pointer("/rateLimitResetCredits/availableCount").and_then(Value::as_u64);
+    let reset_credit_expires_at = rate_result
+        .pointer("/rateLimitResetCredits/credits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|credit| {
+            credit
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status.eq_ignore_ascii_case("available"))
+        })
+        .filter_map(|credit| credit.get("expiresAt").and_then(Value::as_i64))
+        .filter(|expires_at| *expires_at > 0)
+        .min();
 
     Ok(QuotaSnapshot {
         weekly,
         session,
-        account: AccountSummary { plan_type, reset_credits },
+        account: AccountSummary { plan_type, reset_credits, reset_credit_expires_at },
         fetched_at,
     })
 }
@@ -227,6 +242,38 @@ mod tests {
         assert_eq!(snapshot.weekly.unwrap().display_percent(), 75);
         assert_eq!(snapshot.session.unwrap().display_percent(), 60);
         assert_eq!(snapshot.account.reset_credits, Some(2));
+        assert_eq!(snapshot.account.reset_credit_expires_at, None);
+    }
+
+    #[test]
+    fn selects_the_earliest_available_reset_credit_expiration() {
+        let rate = json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 25, "windowDurationMins": 10080}
+            },
+            "rateLimitResetCredits": {
+                "availableCount": 2,
+                "credits": [
+                    {"status": "used", "expiresAt": 100},
+                    {"status": "available", "expiresAt": 300},
+                    {"status": "AVAILABLE", "expiresAt": 200},
+                    {"status": "available", "expiresAt": -1},
+                    {"status": "expired", "expiresAt": 50}
+                ]
+            }
+        });
+        let snapshot = parse_snapshot(&account(), &rate, 100).unwrap();
+        assert_eq!(snapshot.account.reset_credits, Some(2));
+        assert_eq!(snapshot.account.reset_credit_expires_at, Some(200));
+    }
+
+    #[test]
+    fn keeps_old_cached_account_summaries_compatible() {
+        let summary: AccountSummary =
+            serde_json::from_value(json!({"planType": "pro", "resetCredits": 2})).unwrap();
+        assert_eq!(summary.reset_credits, Some(2));
+        assert_eq!(summary.reset_credit_expires_at, None);
     }
 
     #[test]
