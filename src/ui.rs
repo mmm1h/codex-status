@@ -1,6 +1,6 @@
-use crate::insights::analyze_window;
+use crate::insights::{WindowInsight, analyze_window};
 use crate::model::{DisplayState, QuotaWindow, RefreshState};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Datelike, Local};
 use std::ffi::c_void;
 use std::mem::size_of;
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
@@ -30,7 +30,7 @@ mod backdrop;
 mod direct2d;
 
 pub const CARD_WIDTH: i32 = 420;
-pub const CARD_HEIGHT: i32 = 430;
+pub const CARD_HEIGHT: i32 = 472;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RefreshButtonState {
@@ -92,7 +92,7 @@ pub struct Theme {
 pub fn detect_theme(preference: &str) -> Theme {
     let mut high_contrast =
         HIGHCONTRASTW { cbSize: size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
-    let high_contrast_enabled = unsafe {
+    let detected_high_contrast = unsafe {
         SystemParametersInfoW(
             SPI_GETHIGHCONTRAST,
             high_contrast.cbSize,
@@ -102,6 +102,11 @@ pub fn detect_theme(preference: &str) -> Theme {
         .is_ok()
             && high_contrast.dwFlags.contains(HCF_HIGHCONTRASTON)
     };
+    #[cfg(feature = "diagnostics")]
+    let high_contrast_enabled = detected_high_contrast
+        || std::env::var_os("CODEX_STATUS_DIAGNOSTIC_HIGH_CONTRAST").is_some();
+    #[cfg(not(feature = "diagnostics"))]
+    let high_contrast_enabled = detected_high_contrast;
     let personalize = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
         .ok();
@@ -232,6 +237,7 @@ pub fn paint_card(
     theme: Theme,
     refresh_button: RefreshButtonState,
     refreshing: bool,
+    refresh_angle_degrees: f32,
 ) {
     unsafe {
         let mut paint = PAINTSTRUCT::default();
@@ -251,6 +257,7 @@ pub fn paint_card(
             theme,
             refresh_button,
             refreshing,
+            refresh_angle_degrees,
             glass_enabled: backdrop::glass_enabled(hwnd),
         }) {
             let requires_opaque = direct2d::take_gdi_frame_requires_opaque();
@@ -263,11 +270,29 @@ pub fn paint_card(
             let bitmap = CreateCompatibleBitmap(hdc, width, height);
             if !buffer.is_invalid() && !bitmap.is_invalid() {
                 let old_bitmap = SelectObject(buffer, HGDIOBJ(bitmap.0));
-                draw_card(buffer, state, locale, theme, refresh_button, refreshing, dpi);
+                draw_card(
+                    buffer,
+                    state,
+                    locale,
+                    theme,
+                    refresh_button,
+                    refreshing,
+                    refresh_angle_degrees,
+                    dpi,
+                );
                 let _ = BitBlt(hdc, 0, 0, width, height, Some(buffer), 0, 0, SRCCOPY);
                 let _ = SelectObject(buffer, old_bitmap);
             } else {
-                draw_card(hdc, state, locale, theme, refresh_button, refreshing, dpi);
+                draw_card(
+                    hdc,
+                    state,
+                    locale,
+                    theme,
+                    refresh_button,
+                    refreshing,
+                    refresh_angle_degrees,
+                    dpi,
+                );
             }
             if !bitmap.is_invalid() {
                 let _ = DeleteObject(HGDIOBJ(bitmap.0));
@@ -300,6 +325,7 @@ unsafe fn draw_card(
     theme: Theme,
     refresh_button: RefreshButtonState,
     refreshing: bool,
+    refresh_angle_degrees: f32,
     dpi: u32,
 ) {
     unsafe {
@@ -312,10 +338,10 @@ unsafe fn draw_card(
         fill_rounded(
             hdc,
             RECT {
-                left: scale(20, dpi),
-                top: scale(28, dpi),
-                right: scale(28, dpi),
-                bottom: scale(36, dpi),
+                left: scale(19, dpi),
+                top: scale(27, dpi),
+                right: scale(29, dpi),
+                bottom: scale(37, dpi),
             },
             scale(8, dpi),
             status_color,
@@ -327,10 +353,10 @@ unsafe fn draw_card(
             RECT {
                 left: scale(39, dpi),
                 top: scale(10, dpi),
-                right: scale(102, dpi),
-                bottom: scale(54, dpi),
+                right: scale(106, dpi),
+                bottom: scale(56, dpi),
             },
-            scale(14, dpi),
+            scale(18, dpi),
             FW_SEMIBOLD.0 as i32,
             theme.text,
         );
@@ -338,24 +364,24 @@ unsafe fn draw_card(
         draw_text(
             hdc,
             locale,
-            &updated_text(state),
+            &updated_text(state, locale),
             RECT {
-                left: scale(108, dpi),
-                top: scale(11, dpi),
-                right: scale(245, dpi),
-                bottom: scale(53, dpi),
+                left: scale(112, dpi),
+                top: scale(8, dpi),
+                right: scale(350, dpi),
+                bottom: scale(56, dpi),
             },
             scale(12, dpi),
             FW_NORMAL.0 as i32,
             theme.muted,
         );
-        draw_refresh_button(hdc, theme, refresh_button, refreshing, dpi);
+        draw_refresh_button(hdc, theme, refresh_button, refreshing, refresh_angle_degrees, dpi);
 
         let hero = RECT {
             left: scale(16, dpi),
             top: scale(64, dpi),
             right: width - scale(16, dpi),
-            bottom: scale(385, dpi),
+            bottom: scale(400, dpi),
         };
         if theme.high_contrast {
             outlined_surface(hdc, hero, scale(8, dpi), theme.surface, theme.line, dpi);
@@ -460,17 +486,7 @@ unsafe fn draw_card(
                 snapshot.weekly.as_ref().map(|window| analyze_window(window, snapshot.fetched_at))
             })
             .filter(|insight| insight.reset_at.is_some_and(|reset_at| reset_at > now));
-        let projection = weekly_usage_projection(state, now);
-        let pace_text = projection.map_or_else(
-            || {
-                if pace_insight.is_some_and(|insight| insight.elapsed_percent.is_some()) {
-                    locale.text("Usage pace on track", "用量节奏正常").to_owned()
-                } else {
-                    locale.text("Waiting for usage pace", "等待用量节奏数据").to_owned()
-                }
-            },
-            |value| projection_label(value, locale).text,
-        );
+        let pace_text = pace_label(pace_insight, locale);
         draw_text(
             hdc,
             locale,
@@ -504,12 +520,13 @@ unsafe fn draw_card(
             .and_then(|snapshot| snapshot.account.reset_credits)
             .map(|credits| format!("{credits} {}", locale.text("resets", "次")))
             .unwrap_or_else(|| "--".to_owned());
+        let credit_expiry = credit_expiry_text(state, locale, now);
 
         let metrics = RECT {
             left: scale(16, dpi),
             top: scale(315, dpi),
             right: width - scale(16, dpi),
-            bottom: scale(385, dpi),
+            bottom: scale(400, dpi),
         };
         if theme.high_contrast {
             outlined_surface(hdc, metrics, scale(8, dpi), theme.surface_alt, theme.line, dpi);
@@ -523,6 +540,7 @@ unsafe fn draw_card(
                 RECT { right: scale(145, dpi), ..metrics },
                 locale.text("Plan", "套餐"),
                 &plan,
+                None,
                 theme,
                 dpi,
             );
@@ -532,6 +550,7 @@ unsafe fn draw_card(
                 RECT { left: scale(145, dpi), right: scale(274, dpi), ..metrics },
                 locale.text("Session quota", "会话额度"),
                 &session,
+                None,
                 theme,
                 dpi,
             );
@@ -541,6 +560,7 @@ unsafe fn draw_card(
                 RECT { left: scale(274, dpi), ..metrics },
                 locale.text("Reset credits", "重置机会"),
                 &credits,
+                credit_expiry.as_deref(),
                 theme,
                 dpi,
             );
@@ -551,6 +571,7 @@ unsafe fn draw_card(
                 RECT { right: scale(210, dpi), ..metrics },
                 locale.text("Plan", "套餐"),
                 &plan,
+                None,
                 theme,
                 dpi,
             );
@@ -560,26 +581,13 @@ unsafe fn draw_card(
                 RECT { left: scale(210, dpi), ..metrics },
                 locale.text("Reset credits", "重置机会"),
                 &credits,
+                credit_expiry.as_deref(),
                 theme,
                 dpi,
             );
         }
 
-        let footer = footer_text(state, locale);
-        draw_text(
-            hdc,
-            locale,
-            &footer,
-            RECT {
-                left: scale(32, dpi),
-                top: scale(390, dpi),
-                right: width - scale(32, dpi),
-                bottom: height,
-            },
-            scale(12, dpi),
-            FW_NORMAL.0 as i32,
-            if state.error.is_some() { accent_red(theme) } else { theme.muted },
-        );
+        draw_footer(hdc, state, locale, theme, status_color, now, width, dpi);
     }
 }
 
@@ -602,6 +610,7 @@ unsafe fn draw_refresh_button(
     theme: Theme,
     state: RefreshButtonState,
     refreshing: bool,
+    refresh_angle_degrees: f32,
     dpi: u32,
 ) {
     unsafe {
@@ -620,17 +629,37 @@ unsafe fn draw_refresh_button(
         draw_text(
             hdc,
             Locale::English,
-            if refreshing { "…" } else { "↻" },
+            "↻",
             RECT {
-                left: rect.left + scale(if refreshing { 9 } else { 7 }, dpi),
+                left: rect.left + scale(7, dpi),
                 top: rect.top,
                 right: rect.right,
                 bottom: rect.bottom,
             },
-            scale(if refreshing { 18 } else { 21 }, dpi),
+            scale(21, dpi),
             FW_NORMAL.0 as i32,
             if state == RefreshButtonState::Pressed { theme.text } else { theme.muted },
         );
+        if refreshing {
+            let angle = (refresh_angle_degrees - 90.0).to_radians();
+            let center_x = scale(386, dpi);
+            let center_y = scale(32, dpi);
+            let radius = scale(8, dpi);
+            let marker = scale(3, dpi).max(2);
+            let x = center_x + (radius as f32 * angle.cos()).round() as i32;
+            let y = center_y + (radius as f32 * angle.sin()).round() as i32;
+            fill_rounded(
+                hdc,
+                RECT {
+                    left: x - marker / 2,
+                    top: y - marker / 2,
+                    right: x + marker,
+                    bottom: y + marker,
+                },
+                marker,
+                if state == RefreshButtonState::Pressed { theme.text } else { theme.muted },
+            );
+        }
     }
 }
 
@@ -695,12 +724,14 @@ unsafe fn draw_percentage(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn metric_column(
     hdc: HDC,
     locale: Locale,
     rect: RECT,
     label: &str,
     value: &str,
+    secondary: Option<&str>,
     theme: Theme,
     dpi: u32,
 ) {
@@ -725,13 +756,102 @@ unsafe fn metric_column(
             value,
             RECT {
                 left: rect.left + scale(16, dpi),
-                top: rect.top + scale(30, dpi),
+                top: rect.top + scale(29, dpi),
                 right: rect.right - scale(16, dpi),
-                bottom: rect.bottom - scale(4, dpi),
+                bottom: rect.top + scale(59, dpi),
             },
             scale(20, dpi),
             FW_SEMIBOLD.0 as i32,
             theme.text,
+        );
+        if let Some(secondary) = secondary {
+            draw_text(
+                hdc,
+                locale,
+                secondary,
+                RECT {
+                    left: rect.left + scale(16, dpi),
+                    top: rect.top + scale(57, dpi),
+                    right: rect.right - scale(12, dpi),
+                    bottom: rect.bottom - scale(2, dpi),
+                },
+                scale(12, dpi),
+                FW_NORMAL.0 as i32,
+                theme.muted,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_footer(
+    hdc: HDC,
+    state: &DisplayState,
+    locale: Locale,
+    theme: Theme,
+    accent: COLORREF,
+    now: i64,
+    width: i32,
+    dpi: u32,
+) {
+    unsafe {
+        let primary = footer_primary(state, locale, now);
+        let primary_color = if state.error.is_some() {
+            accent_red(theme)
+        } else if theme.high_contrast {
+            theme.text
+        } else if theme.dark {
+            rgb(190, 197, 194)
+        } else {
+            rgb(73, 83, 93)
+        };
+        let area = RECT {
+            left: scale(32, dpi),
+            top: scale(405, dpi),
+            right: width - scale(32, dpi),
+            bottom: scale(433, dpi),
+        };
+        if let Some(duration) = primary.duration.as_deref() {
+            let font_size = scale(12, dpi);
+            let weight = FW_NORMAL.0 as i32;
+            draw_text(hdc, locale, &primary.prefix, area, font_size, weight, primary_color);
+            let prefix_width = measure_text_width(hdc, locale, &primary.prefix, font_size, weight);
+            let duration_area = RECT { left: area.left + prefix_width, ..area };
+            draw_text(hdc, locale, duration, duration_area, font_size, weight, accent);
+            let duration_width = measure_text_width(hdc, locale, duration, font_size, weight);
+            draw_text(
+                hdc,
+                locale,
+                &primary.suffix,
+                RECT { left: duration_area.left + duration_width, ..area },
+                font_size,
+                weight,
+                primary_color,
+            );
+        } else {
+            draw_text(
+                hdc,
+                locale,
+                &primary.text(),
+                area,
+                scale(12, dpi),
+                FW_NORMAL.0 as i32,
+                primary_color,
+            );
+        }
+        draw_text(
+            hdc,
+            locale,
+            footer_secondary(state, locale),
+            RECT {
+                left: scale(32, dpi),
+                top: scale(431, dpi),
+                right: width - scale(32, dpi),
+                bottom: scale(459, dpi),
+            },
+            scale(12, dpi),
+            FW_NORMAL.0 as i32,
+            theme.muted,
         );
     }
 }
@@ -761,31 +881,71 @@ unsafe fn outlined_surface(
     }
 }
 
-fn updated_text(state: &DisplayState) -> String {
-    state
+fn updated_text(state: &DisplayState, locale: Locale) -> String {
+    let time = state
         .snapshot
         .as_ref()
         .and_then(|snapshot| DateTime::from_timestamp(snapshot.fetched_at, 0))
         .map(|time| time.with_timezone(&Local).format("%H:%M").to_string())
-        .unwrap_or_else(|| "--:--".to_owned())
+        .unwrap_or_else(|| "--:--".to_owned());
+    format!("{} {time}", locale.text("Updated", "已更新"))
 }
 
-fn footer_text(state: &DisplayState, locale: Locale) -> String {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FooterLine {
+    prefix: String,
+    duration: Option<String>,
+    suffix: String,
+}
+
+impl FooterLine {
+    fn plain(text: impl Into<String>) -> Self {
+        Self { prefix: text.into(), duration: None, suffix: String::new() }
+    }
+
+    fn text(&self) -> String {
+        format!("{}{}{}", self.prefix, self.duration.as_deref().unwrap_or_default(), self.suffix)
+    }
+}
+
+fn footer_primary(state: &DisplayState, locale: Locale, now: i64) -> FooterLine {
     if let Some(error) = state.error.as_deref() {
         let prefix = if state.weekly_percent().is_some() {
             locale.text("Cached · ", "缓存 · ")
         } else {
             locale.text("Unavailable · ", "不可用 · ")
         };
-        return format!("{prefix}{error}");
+        return FooterLine::plain(format!("{prefix}{error}"));
     }
     if state.refresh_state == RefreshState::Loading {
-        return locale.text("Refreshing Codex quota…", "正在刷新 Codex 额度…").to_owned();
+        return FooterLine::plain(locale.text("Refreshing Codex quota…", "正在刷新 Codex 额度…"));
     }
-    if state.snapshot.is_some() {
-        locale.text("Read only from local Codex", "仅从本机 Codex 读取").to_owned()
+    if let Some(projection) = weekly_usage_projection(state, now) {
+        return projection_label(projection, locale);
+    }
+
+    let Some(window) = state.snapshot.as_ref().and_then(|snapshot| snapshot.weekly.as_ref()) else {
+        return FooterLine::plain(
+            locale.text("Not enough data to forecast", "数据不足，暂无法预测"),
+        );
+    };
+    if window.resets_at.is_some_and(|reset_at| reset_at <= now) {
+        return FooterLine::plain(locale.text("Quota window has reset", "额度周期已重置"));
+    }
+    let snapshot = state.snapshot.as_ref().expect("weekly window requires a snapshot");
+    let insight = analyze_window(window, snapshot.fetched_at);
+    if insight.used_percent.is_none() || insight.elapsed_percent.is_none() {
+        FooterLine::plain(locale.text("Not enough data to forecast", "数据不足，暂无法预测"))
     } else {
-        locale.text("Waiting for Codex", "等待 Codex 数据").to_owned()
+        FooterLine::plain(locale.text("Current pace lasts through reset", "按当前速率可持续至重置"))
+    }
+}
+
+fn footer_secondary(state: &DisplayState, locale: Locale) -> &'static str {
+    if state.snapshot.is_some() {
+        locale.text("Read only from local Codex", "仅从本机 Codex 读取")
+    } else {
+        locale.text("Waiting for Codex", "等待 Codex 数据")
     }
 }
 
@@ -812,32 +972,61 @@ fn weekly_usage_projection(state: &DisplayState, now: i64) -> Option<UsageProjec
     Some(UsageProjection::DepletesIn { seconds: projected_at.saturating_sub(now).max(0) })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectionLabel {
-    text: String,
-}
-
-fn projection_label(projection: UsageProjection, locale: Locale) -> ProjectionLabel {
-    let text = match projection {
-        UsageProjection::Exhausted => locale.text("Quota exhausted", "额度耗尽").to_owned(),
+fn projection_label(projection: UsageProjection, locale: Locale) -> FooterLine {
+    match projection {
+        UsageProjection::Exhausted => {
+            FooterLine::plain(locale.text("Quota exhausted", "额度已耗尽"))
+        }
         UsageProjection::DepletesIn { seconds } => {
             let total_hours = if seconds <= 0 { 0 } else { seconds.saturating_add(3_599) / 3_600 };
             let days = total_hours / 24;
             let hours = total_hours % 24;
             if locale == Locale::Chinese {
-                if days > 0 {
-                    format!("用量偏快 · 约{days}天{hours}小时后耗尽")
+                let duration = if days > 0 {
+                    format!("{days} 天 {hours} 小时")
                 } else {
-                    format!("用量偏快 · 约{hours}小时后耗尽")
+                    format!("{hours} 小时")
+                };
+                FooterLine {
+                    prefix: "按当前速率 ".to_owned(),
+                    duration: Some(duration),
+                    suffix: "后耗尽".to_owned(),
                 }
-            } else if days > 0 {
-                format!("Pace high · empty in ~{days}d {hours}h")
             } else {
-                format!("Pace high · empty in ~{hours}h")
+                let duration =
+                    if days > 0 { format!("{days}d {hours}h") } else { format!("{hours}h") };
+                FooterLine {
+                    prefix: "At current pace, depleted in ".to_owned(),
+                    duration: Some(duration),
+                    suffix: String::new(),
+                }
             }
         }
-    };
-    ProjectionLabel { text }
+    }
+}
+
+fn pace_label(insight: Option<WindowInsight>, locale: Locale) -> String {
+    match insight {
+        Some(insight) if insight.elapsed_percent.is_some() && insight.is_ahead_of_pace => {
+            locale.text("Usage pace high", "用量偏快").to_owned()
+        }
+        Some(insight) if insight.elapsed_percent.is_some() => {
+            locale.text("Usage pace on track", "用量节奏正常").to_owned()
+        }
+        _ => locale.text("Waiting for usage pace", "等待用量节奏数据").to_owned(),
+    }
+}
+
+fn credit_expiry_text(state: &DisplayState, locale: Locale, now: i64) -> Option<String> {
+    let expires_at = state.snapshot.as_ref()?.account.reset_credit_expires_at?;
+    if expires_at <= now {
+        return None;
+    }
+    let date = DateTime::from_timestamp(expires_at, 0)?.with_timezone(&Local);
+    Some(match locale {
+        Locale::Chinese => format!("最近到期 {}月{}日", date.month(), date.day()),
+        Locale::English => format!("Expires {} {}", date.format("%b"), date.day()),
+    })
 }
 
 fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
@@ -1171,22 +1360,30 @@ mod tests {
                 UsageProjection::DepletesIn { seconds: 25 * 60 * 60 },
                 Locale::Chinese,
             ),
-            ProjectionLabel { text: "用量偏快 · 约1天1小时后耗尽".to_owned() }
+            FooterLine {
+                prefix: "按当前速率 ".to_owned(),
+                duration: Some("1 天 1 小时".to_owned()),
+                suffix: "后耗尽".to_owned(),
+            }
         );
         assert_eq!(
             projection_label(
                 UsageProjection::DepletesIn { seconds: 25 * 60 * 60 },
                 Locale::English,
             ),
-            ProjectionLabel { text: "Pace high · empty in ~1d 1h".to_owned() }
+            FooterLine {
+                prefix: "At current pace, depleted in ".to_owned(),
+                duration: Some("1d 1h".to_owned()),
+                suffix: String::new(),
+            }
         );
         assert_eq!(
             projection_label(UsageProjection::Exhausted, Locale::Chinese),
-            ProjectionLabel { text: "额度耗尽".to_owned() }
+            FooterLine::plain("额度已耗尽")
         );
         assert_eq!(
             projection_label(UsageProjection::Exhausted, Locale::English),
-            ProjectionLabel { text: "Quota exhausted".to_owned() }
+            FooterLine::plain("Quota exhausted")
         );
     }
 

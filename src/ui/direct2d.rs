@@ -5,9 +5,9 @@
 //! D3D11/D2D/DComp device and fallback contracts remain independent of styling.
 
 use super::{
-    Locale, RefreshButtonState, Theme, accent_for, accent_red, footer_text, plan_label,
-    projection_label, refresh_button_fill, reset_details, rgb, updated_text,
-    weekly_usage_projection,
+    Locale, RefreshButtonState, Theme, accent_for, accent_red, credit_expiry_text, footer_primary,
+    footer_secondary, pace_label, plan_label, refresh_button_fill, reset_details, rgb,
+    updated_text,
 };
 use crate::insights::analyze_window;
 use crate::model::DisplayState;
@@ -83,6 +83,7 @@ pub(super) struct PaintInput<'a> {
     pub theme: Theme,
     pub refresh_button: RefreshButtonState,
     pub refreshing: bool,
+    pub refresh_angle_degrees: f32,
     pub glass_enabled: bool,
 }
 
@@ -262,6 +263,7 @@ impl Renderer {
             input.theme,
             input.refresh_button,
             input.refreshing,
+            input.refresh_angle_degrees,
             input.glass_enabled,
         );
         let end_result = unsafe { context.EndDraw(None, None) };
@@ -523,7 +525,7 @@ impl FormatSet {
                 factory,
                 family,
                 locale,
-                14.0,
+                18.0,
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
                 false,
@@ -682,6 +684,7 @@ struct Brushes {
     accent: ID2D1SolidColorBrush,
     accent_glow_soft: ID2D1SolidColorBrush,
     error: ID2D1SolidColorBrush,
+    footer_primary: ID2D1SolidColorBrush,
 }
 
 impl Brushes {
@@ -701,6 +704,16 @@ impl Brushes {
                 if glow_allowed { 0.08 } else { 0.0 },
             )?,
             error: solid_brush(target, error)?,
+            footer_primary: solid_brush(
+                target,
+                if theme.high_contrast {
+                    theme.text
+                } else if theme.dark {
+                    rgb(190, 197, 194)
+                } else {
+                    rgb(73, 83, 93)
+                },
+            )?,
         })
     }
 }
@@ -715,6 +728,7 @@ fn draw_frame(
     theme: Theme,
     refresh_button: RefreshButtonState,
     refreshing: bool,
+    refresh_angle_degrees: f32,
     glass_enabled: bool,
 ) -> Result<()> {
     let brushes = Brushes::new(target, state, theme)?;
@@ -732,10 +746,11 @@ fn draw_frame(
         theme,
         refresh_button,
         refreshing,
+        refresh_angle_degrees,
     )?;
     draw_hero_content(target, dwrite, formats, &brushes, state, locale, theme, accent)?;
     draw_metrics_content(target, dwrite, formats, &brushes, state, locale)?;
-    draw_footer_content(target, formats, &brushes, state, locale);
+    draw_footer_content(target, dwrite, formats, &brushes, state, locale)?;
     Ok(())
 }
 
@@ -769,16 +784,16 @@ fn draw_background_layer(
         end,
         alpha,
         Vector2 { X: 0.0, Y: 0.0 },
-        Vector2 { X: 420.0, Y: 430.0 },
+        Vector2 { X: 420.0, Y: 472.0 },
     )?;
     unsafe {
-        target.FillRectangle(&rect(0.0, 0.0, 420.0, 430.0), &background);
+        target.FillRectangle(&rect(0.0, 0.0, 420.0, 472.0), &background);
     }
     Ok(())
 }
 
 fn draw_surface_layer(target: &ID2D1DeviceContext, brushes: &Brushes, theme: Theme) -> Result<()> {
-    let hero = rounded_rect(16.0, 64.0, 404.0, 385.0, 8.0);
+    let hero = rounded_rect(16.0, 64.0, 404.0, 400.0, 8.0);
     let hero_gradient = linear_gradient_alpha_pair(
         target,
         theme.surface,
@@ -800,7 +815,7 @@ fn draw_surface_layer(target: &ID2D1DeviceContext, brushes: &Brushes, theme: The
         Vector2 { X: 20.0, Y: 68.0 },
         Vector2 { X: 398.0, Y: 376.0 },
     )?;
-    let facts = rounded_rect(16.0, 315.0, 404.0, 385.0, 8.0);
+    let facts = rounded_rect(16.0, 315.0, 404.0, 400.0, 8.0);
     let fact_brush = solid_brush_alpha(
         target,
         theme.surface_alt,
@@ -866,7 +881,7 @@ fn draw_glass_text_scrims(
     let scrim = solid_brush_alpha(target, scrim_color, if theme.dark { 0.18 } else { 0.20 })?;
     unsafe {
         target.FillRectangle(&rect(0.0, 0.0, 420.0, 64.0), &scrim);
-        target.FillRectangle(&rect(0.0, 385.0, 420.0, 430.0), &scrim);
+        target.FillRectangle(&rect(0.0, 400.0, 420.0, 472.0), &scrim);
     }
     Ok(())
 }
@@ -881,18 +896,19 @@ fn draw_header_content(
     theme: Theme,
     button_state: RefreshButtonState,
     refreshing: bool,
+    refresh_angle_degrees: f32,
 ) -> Result<()> {
     let button_brush = solid_brush(target, refresh_button_fill(theme, button_state))?;
     let button = rounded_rect(368.0, 14.0, 404.0, 50.0, 4.0);
     unsafe {
-        target.FillEllipse(&ellipse(24.0, 32.0, 4.0), &brushes.accent);
-        draw_text(target, "Codex", rect(39.0, 10.0, 102.0, 54.0), &formats.header, &brushes.text);
+        target.FillEllipse(&ellipse(24.0, 32.0, 5.0), &brushes.accent);
+        draw_text(target, "Codex", rect(39.0, 8.0, 106.0, 56.0), &formats.header, &brushes.text);
         draw_tabular_text(
             target,
             dwrite,
             formats,
-            &updated_text(state),
-            rect(108.0, 11.0, 245.0, 53.0),
+            &updated_text(state, formats.locale),
+            rect(112.0, 8.0, 350.0, 56.0),
             &formats.update,
             &brushes.muted,
         )?;
@@ -905,11 +921,15 @@ fn draw_header_content(
         } else {
             &brushes.muted
         };
-        if refreshing {
-            draw_spinner(target, 386.0, 32.0, 8.0, icon_brush, 1.8);
-        } else {
-            draw_ring_arrow(target, 386.0, 32.0, 7.4, icon_brush, 1.7)?;
-        }
+        draw_ring_arrow(
+            target,
+            386.0,
+            32.0,
+            7.4,
+            icon_brush,
+            1.7,
+            if refreshing { refresh_angle_degrees } else { 0.0 },
+        )?;
     }
     Ok(())
 }
@@ -1084,17 +1104,7 @@ fn draw_quota_track(
             snapshot.weekly.as_ref().map(|window| analyze_window(window, snapshot.fetched_at))
         })
         .filter(|insight| insight.reset_at.is_some_and(|reset_at| reset_at > now));
-    let projection = weekly_usage_projection(state, now);
-    let pace_text = projection.map_or_else(
-        || {
-            if pace_insight.is_some_and(|insight| insight.elapsed_percent.is_some()) {
-                locale.text("Usage pace on track", "用量节奏正常").to_owned()
-            } else {
-                locale.text("Waiting for usage pace", "等待用量节奏数据").to_owned()
-            }
-        },
-        |value| projection_label(value, locale).text,
-    );
+    let pace_text = pace_label(pace_insight, locale);
     draw_tabular_text(
         target,
         dwrite,
@@ -1133,6 +1143,7 @@ fn draw_metrics_content(
         .and_then(|snapshot| snapshot.account.reset_credits)
         .map(|credits| format!("{credits} {}", locale.text("resets", "次")))
         .unwrap_or_else(|| "--".to_owned());
+    let credit_expiry = credit_expiry_text(state, locale, Local::now().timestamp());
 
     if let Some(session) = session {
         draw_metric(
@@ -1140,27 +1151,30 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(16.0, 315.0, 145.0, 385.0),
+            rect(16.0, 315.0, 145.0, 400.0),
             locale.text("Plan", "套餐"),
             &plan,
+            None,
         )?;
         draw_metric(
             target,
             dwrite,
             formats,
             brushes,
-            rect(145.0, 315.0, 274.0, 385.0),
+            rect(145.0, 315.0, 274.0, 400.0),
             locale.text("Session quota", "会话额度"),
             &session,
+            None,
         )?;
         draw_metric(
             target,
             dwrite,
             formats,
             brushes,
-            rect(274.0, 315.0, 404.0, 385.0),
+            rect(274.0, 315.0, 404.0, 400.0),
             locale.text("Reset credits", "重置机会"),
             &credits,
+            credit_expiry.as_deref(),
         )?;
     } else {
         draw_metric(
@@ -1168,23 +1182,26 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(16.0, 315.0, 210.0, 385.0),
+            rect(16.0, 315.0, 210.0, 400.0),
             locale.text("Plan", "套餐"),
             &plan,
+            None,
         )?;
         draw_metric(
             target,
             dwrite,
             formats,
             brushes,
-            rect(210.0, 315.0, 404.0, 385.0),
+            rect(210.0, 315.0, 404.0, 400.0),
             locale.text("Reset credits", "重置机会"),
             &credits,
+            credit_expiry.as_deref(),
         )?;
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_metric(
     target: &ID2D1DeviceContext,
     dwrite: &IDWriteFactory,
@@ -1193,6 +1210,7 @@ fn draw_metric(
     area: D2D_RECT_F,
     label: &str,
     value: &str,
+    secondary: Option<&str>,
 ) -> Result<()> {
     unsafe {
         draw_text(
@@ -1207,31 +1225,67 @@ fn draw_metric(
             dwrite,
             formats,
             value,
-            rect(area.left + 16.0, area.top + 30.0, area.right - 16.0, area.bottom - 4.0),
+            rect(area.left + 16.0, area.top + 29.0, area.right - 16.0, area.top + 59.0),
             &formats.metric_value,
             &brushes.text,
         )?;
+        if let Some(secondary) = secondary {
+            draw_text(
+                target,
+                secondary,
+                rect(area.left + 16.0, area.top + 57.0, area.right - 12.0, area.bottom - 2.0),
+                &formats.metric_label,
+                &brushes.muted,
+            );
+        }
     }
     Ok(())
 }
 
 fn draw_footer_content(
     target: &ID2D1DeviceContext,
+    dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
     state: &DisplayState,
     locale: Locale,
-) {
-    let footer_brush = if state.error.is_some() { &brushes.error } else { &brushes.muted };
+) -> Result<()> {
+    let primary = footer_primary(state, locale, Local::now().timestamp());
+    let text = primary.text();
+    let text_utf16: Vec<u16> = text.encode_utf16().collect();
+    let layout = unsafe { dwrite.CreateTextLayout(&text_utf16, &formats.footer, 356.0, 28.0)? };
+    if let Some(duration) = primary.duration.as_deref() {
+        let start = primary.prefix.encode_utf16().count() as u32;
+        let length = duration.encode_utf16().count() as u32;
+        unsafe {
+            layout.SetTypography(
+                &formats.tabular,
+                DWRITE_TEXT_RANGE { startPosition: start, length },
+            )?;
+            layout.SetDrawingEffect(
+                &brushes.accent,
+                DWRITE_TEXT_RANGE { startPosition: start, length },
+            )?;
+        }
+    }
+    let primary_brush =
+        if state.error.is_some() { &brushes.error } else { &brushes.footer_primary };
     unsafe {
+        target.DrawTextLayout(
+            Vector2 { X: 32.0, Y: 405.0 },
+            &layout,
+            primary_brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
         draw_text(
             target,
-            &footer_text(state, locale),
-            rect(32.0, 390.0, 388.0, 429.0),
+            footer_secondary(state, locale),
+            rect(32.0, 431.0, 388.0, 459.0),
             &formats.footer,
-            footer_brush,
+            &brushes.muted,
         );
     }
+    Ok(())
 }
 
 unsafe fn draw_text(
@@ -1341,28 +1395,6 @@ fn draw_blurred_mask(
     Ok(())
 }
 
-fn draw_spinner(
-    target: &ID2D1DeviceContext,
-    x: f32,
-    y: f32,
-    radius: f32,
-    brush: &ID2D1SolidColorBrush,
-    stroke: f32,
-) {
-    let segment_count = 10;
-    unsafe {
-        for index in 0..8 {
-            let angle = (-90.0 + index as f32 * 360.0 / segment_count as f32).to_radians();
-            let inner = Vector2 {
-                X: x + (radius - 2.5) * angle.cos(),
-                Y: y + (radius - 2.5) * angle.sin(),
-            };
-            let outer = Vector2 { X: x + radius * angle.cos(), Y: y + radius * angle.sin() };
-            target.DrawLine(inner, outer, brush, stroke, None::<&ID2D1StrokeStyle>);
-        }
-    }
-}
-
 fn draw_ring_arrow(
     target: &ID2D1DeviceContext,
     x: f32,
@@ -1370,11 +1402,12 @@ fn draw_ring_arrow(
     radius: f32,
     brush: &ID2D1SolidColorBrush,
     stroke: f32,
+    rotation_degrees: f32,
 ) -> Result<()> {
     // A 292° clockwise arc leaves a deliberate 68° gap. The arrowhead is
     // proportional to the radius and filled, so it remains a triangle rather
     // than collapsing into a tiny hooked stroke at high DPI.
-    let start_angle = 28.0_f32.to_radians();
+    let start_angle = (28.0_f32 + rotation_degrees).to_radians();
     let sweep = 292.0_f32.to_radians();
     let segment_count = (radius * 2.2).round().clamp(18.0, 34.0) as usize;
     let point = |angle: f32| Vector2 { X: x + radius * angle.cos(), Y: y + radius * angle.sin() };
@@ -1561,8 +1594,8 @@ mod tests {
     #[test]
     fn card_geometry_stays_inside_the_logical_surface() {
         for surface in [
-            rounded_rect(16.0, 64.0, 404.0, 385.0, 8.0),
-            rounded_rect(16.0, 315.0, 404.0, 385.0, 8.0),
+            rounded_rect(16.0, 64.0, 404.0, 400.0, 8.0),
+            rounded_rect(16.0, 315.0, 404.0, 400.0, 8.0),
         ] {
             assert!(surface.rect.left >= 0.0);
             assert!(surface.rect.right <= super::super::CARD_WIDTH as f32);

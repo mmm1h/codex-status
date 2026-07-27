@@ -35,9 +35,9 @@ impl IconTone {
             return foreground(dark_taskbar, false);
         }
         match self {
-            Self::Healthy => [16, 146, 103, 255],
-            Self::Warning => [214, 137, 16, 255],
-            Self::Critical => [224, 49, 65, 255],
+            Self::Healthy => [20, 158, 124, 255],
+            Self::Warning => [184, 119, 31, 255],
+            Self::Critical => [194, 83, 94, 255],
             Self::Stale => [112, 122, 134, 255],
             Self::Unavailable => [132, 141, 151, 255],
         }
@@ -145,8 +145,11 @@ fn render_rgba(
     }
 
     let accent = tone.accent(high_contrast, dark_taskbar);
-    for x in 1..size.saturating_sub(1) {
-        set_pixel(&mut pixels, size, x as i32, size as i32 - 1, accent);
+    let rule_thickness = (size / 8).clamp(2, 3);
+    for y in size.saturating_sub(rule_thickness)..size {
+        for x in 1..size.saturating_sub(1) {
+            set_pixel(&mut pixels, size, x as i32, y as i32, accent);
+        }
     }
     draw_service_overlay(&mut pixels, size, overlay, high_contrast, dark_taskbar);
     pixels
@@ -166,9 +169,9 @@ fn draw_service_overlay(
     let color = if high_contrast {
         foreground(dark_taskbar, false)
     } else if overlay == ServiceOverlay::Outage {
-        [224, 49, 65, 255]
+        [194, 83, 94, 255]
     } else {
-        [214, 137, 16, 255]
+        [184, 119, 31, 255]
     };
     let right = size as i32 - 1;
     for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
@@ -319,8 +322,9 @@ fn crop_grayscale(source: &[u8], width: usize, height: usize) -> Option<GrayMask
 }
 
 fn composite_mask(pixels: &mut [[u8; 4]], size: u32, mask: &GrayMask, color: [u8; 4]) {
-    let max_width = size.saturating_sub(2) as usize;
-    let max_height = size.saturating_sub(3) as usize;
+    let rule_thickness = (size / 8).clamp(2, 3);
+    let max_width = size as usize;
+    let max_height = size.saturating_sub(rule_thickness + 1) as usize;
     let width_limited_height = max_width * mask.height / mask.width.max(1);
     let target_height = max_height.min(width_limited_height.max(1));
     let target_width = (target_height * mask.width / mask.height.max(1)).clamp(1, max_width);
@@ -371,12 +375,14 @@ fn draw_fallback_label(pixels: &mut [[u8; 4]], size: u32, label: &str, color: [u
     let glyph_height = 7_i32;
     let glyph_count = label.chars().count() as i32;
     let units_width = glyph_count * glyph_width + (glyph_count - 1).max(0);
-    let scale_x = ((size as i32 - 2) / units_width).max(1);
-    let scale_y = ((size as i32 - 3) / glyph_height).max(1);
+    let rule_thickness = (size / 8).clamp(2, 3) as i32;
+    let available_height = size as i32 - rule_thickness - 1;
+    let scale_x = ((size as i32 - 1) / units_width).max(1);
+    let scale_y = (available_height / glyph_height).max(1);
     let width = units_width * scale_x;
     let height = glyph_height * scale_y;
     let origin_x = (size as i32 - width) / 2;
-    let origin_y = (size as i32 - 3 - height) / 2;
+    let origin_y = (available_height - height) / 2;
 
     for (index, character) in label.chars().enumerate() {
         let rows = fallback_glyph(character);
@@ -457,11 +463,11 @@ mod tests {
         let pixels =
             render_rgba(Some(87), IconTone::Healthy, ServiceOverlay::None, 16, false, false);
         let visible: Vec<_> =
-            pixels.iter().enumerate().filter(|(_, pixel)| pixel[3] > 20).collect();
+            pixels[..14 * 16].iter().enumerate().filter(|(_, pixel)| pixel[3] > 20).collect();
         let left = visible.iter().map(|(index, _)| index % 16).min().unwrap();
         let right = visible.iter().map(|(index, _)| index % 16).max().unwrap();
-        assert!(right - left + 1 >= 12);
-        assert!(pixels.iter().filter(|pixel| pixel[3] == 0).count() > 16 * 8);
+        assert!(right - left + 1 >= 14);
+        assert!(pixels.iter().filter(|pixel| pixel[3] == 0).count() > 16 * 5);
     }
 
     #[test]
@@ -478,13 +484,19 @@ mod tests {
     }
 
     #[test]
-    fn status_color_is_a_single_bottom_rule() {
-        let pixels =
-            render_rgba(Some(50), IconTone::Healthy, ServiceOverlay::None, 16, false, false);
-        let accent = IconTone::Healthy.accent(false, false);
-        assert_eq!(pixels[15 * 16], [0, 0, 0, 0]);
-        assert!(pixels[15 * 16 + 1..15 * 16 + 15].iter().all(|pixel| *pixel == accent));
-        assert_eq!(pixels[15 * 16 + 15], [0, 0, 0, 0]);
+    fn status_rule_is_two_pixels_at_16_and_three_at_larger_sizes() {
+        for (size, thickness) in [(16, 2), (24, 3), (32, 3)] {
+            let pixels =
+                render_rgba(Some(50), IconTone::Healthy, ServiceOverlay::None, size, false, false);
+            let accent = IconTone::Healthy.accent(false, false);
+            for y in size - thickness..size {
+                let row = &pixels[(y * size + 1) as usize..((y + 1) * size - 1) as usize];
+                assert!(row.iter().all(|pixel| *pixel == accent));
+            }
+            let row_above = &pixels
+                [((size - thickness - 1) * size) as usize..((size - thickness) * size) as usize];
+            assert!(!row_above.contains(&accent));
+        }
     }
 
     #[test]
@@ -512,7 +524,7 @@ mod tests {
             render_rgba(Some(87), IconTone::Healthy, ServiceOverlay::Outage, 16, false, false);
         for y in 0..2 {
             for x in 13..15 {
-                assert_eq!(outage[y * 16 + x], [224, 49, 65, 255]);
+                assert_eq!(outage[y * 16 + x], [194, 83, 94, 255]);
                 assert_ne!(outage[y * 16 + x], plain[y * 16 + x]);
             }
         }

@@ -11,6 +11,10 @@ All notable changes to CodexStatus are documented here.
 - Drop the large-number glow in light themes, where an emissive halo reads as a rendering artifact rather than as light; dark themes keep only a faint lift.
 - Give the refresh control a real button container with distinct rest, hover, and pressed states, and show refresh progress in place.
 - Align surface geometry and type to the Windows type ramp and geometry guidance, and enable OpenType tabular figures so refreshed values no longer shift horizontally.
+- Project the remaining time at the current burn rate in the footer, tinting the duration with the quota state colour while the pace line keeps only the qualitative judgement.
+- Show the expiry date of the reset credit that lapses soonest beneath the credit count.
+- Spin the refresh glyph while a refresh is in flight, repainting only the button and stopping the timer as soon as the refresh ends or the flyout hides.
+- Enlarge the tray digits and thicken the status rule so the reading survives at 16 px, and move its palette onto the same desaturated green, amber, and red.
 - Read the plan identity from the Codex rate-limit bucket before the broader account token, and label plans the way the official Codex CLI does: `prolite` as Pro Lite, `pro` as Pro, `team` as Business, and `business` as Enterprise. Earlier releases labelled organisation plans one tier low.
 - State the projected weekly depletion time on the pace line when usage is clearly ahead of pace, keeping the local-read privacy note in the footer.
 - Keep flyout graphics devices available for quick reopening, then release the complete graphics stack after more than three minutes of inactivity.

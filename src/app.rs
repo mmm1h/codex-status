@@ -82,6 +82,9 @@ const TIMER_UPDATE: usize = 5;
 const TIMER_WORKING_SET_TRIM: usize = 6;
 const TIMER_STATUS: usize = 7;
 const TIMER_RENDERER_RELEASE: usize = 8;
+const TIMER_REFRESH_ANIMATION: usize = 9;
+const REFRESH_ANIMATION_INTERVAL_MS: u32 = 34;
+const REFRESH_ANIMATION_STEP_DEGREES: u16 = 12;
 
 const UPDATE_INITIAL_DELAY_MS: u32 = 90_000;
 const UPDATE_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
@@ -188,6 +191,7 @@ struct AppState {
     refresh_pending: bool,
     refresh_hovered: bool,
     refresh_pointer_down: bool,
+    refresh_angle_degrees: u16,
     update_checking: bool,
     pending_update: Option<updater::StagedUpdate>,
     status_checking: bool,
@@ -312,6 +316,7 @@ pub fn run() -> Result<(), AppError> {
         refresh_pending: false,
         refresh_hovered: false,
         refresh_pointer_down: false,
+        refresh_angle_degrees: 0,
         update_checking: false,
         pending_update: None,
         status_checking: false,
@@ -520,6 +525,20 @@ unsafe extern "system" fn main_window_proc(
                                 state.schedule_working_set_trim();
                             }
                         }
+                        TIMER_REFRESH_ANIMATION => {
+                            if state.refreshing && IsWindowVisible(state.flyout).as_bool() {
+                                state.refresh_angle_degrees = state
+                                    .refresh_angle_degrees
+                                    .wrapping_add(REFRESH_ANIMATION_STEP_DEGREES)
+                                    % 360;
+                                invalidate_refresh_button(
+                                    state.flyout,
+                                    GetDpiForWindow(state.flyout).max(96),
+                                );
+                            } else {
+                                state.stop_refresh_animation();
+                            }
+                        }
                         _ => {}
                     }
                     return LRESULT(0);
@@ -600,6 +619,7 @@ unsafe extern "system" fn flyout_window_proc(
                     state.theme,
                     refresh_button,
                     state.refreshing,
+                    f32::from(state.refresh_angle_degrees),
                 );
                 return LRESULT(0);
             }
@@ -939,6 +959,7 @@ impl AppState {
             return;
         }
         self.refreshing = true;
+        self.start_refresh_animation();
         self.display.error = None;
         if self.display.snapshot.is_none() {
             self.display.refresh_state = RefreshState::Loading;
@@ -982,6 +1003,7 @@ impl AppState {
 
     fn finish_refresh(&mut self, outcome: RefreshOutcome) {
         self.refreshing = false;
+        self.stop_refresh_animation();
         match outcome.result {
             Ok(snapshot) => {
                 self.failures = 0;
@@ -1254,6 +1276,7 @@ impl AppState {
         self.flyout_hidden_for_tray_activation = None;
         self.refresh_hovered = false;
         self.refresh_pointer_down = false;
+        self.stop_refresh_animation();
         unsafe {
             let _ = ReleaseCapture();
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
@@ -1357,6 +1380,29 @@ impl AppState {
             let _ = SetTimer(Some(self.hwnd), TIMER_CARD, 30_000, None);
             let _ = InvalidateRect(Some(self.flyout), None, false);
         }
+        self.start_refresh_animation();
+    }
+
+    fn start_refresh_animation(&mut self) {
+        if !self.refreshing || !unsafe { IsWindowVisible(self.flyout) }.as_bool() {
+            return;
+        }
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
+            let _ = SetTimer(
+                Some(self.hwnd),
+                TIMER_REFRESH_ANIMATION,
+                REFRESH_ANIMATION_INTERVAL_MS,
+                None,
+            );
+        }
+    }
+
+    fn stop_refresh_animation(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
+        }
+        self.refresh_angle_degrees = 0;
     }
 
     fn tray_rect(&self) -> Option<RECT> {
@@ -1864,6 +1910,7 @@ impl Drop for AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
             let _ = KillTimer(Some(self.hwnd), TIMER_STATUS);
             let _ = KillTimer(Some(self.hwnd), TIMER_RENDERER_RELEASE);
+            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
             if self.tray_added {
                 let data = self.notify_data();
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
