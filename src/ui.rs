@@ -30,7 +30,7 @@ mod backdrop;
 mod direct2d;
 
 pub const CARD_WIDTH: i32 = 420;
-pub const CARD_HEIGHT: i32 = 472;
+pub const CARD_HEIGHT: i32 = 440;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RefreshButtonState {
@@ -381,7 +381,7 @@ unsafe fn draw_card(
             left: scale(16, dpi),
             top: scale(64, dpi),
             right: width - scale(16, dpi),
-            bottom: scale(400, dpi),
+            bottom: scale(392, dpi),
         };
         if theme.high_contrast {
             outlined_surface(hdc, hero, scale(8, dpi), theme.surface, theme.line, dpi);
@@ -524,9 +524,9 @@ unsafe fn draw_card(
 
         let metrics = RECT {
             left: scale(16, dpi),
-            top: scale(315, dpi),
+            top: scale(316, dpi),
             right: width - scale(16, dpi),
-            bottom: scale(400, dpi),
+            bottom: scale(392, dpi),
         };
         if theme.high_contrast {
             outlined_surface(hdc, metrics, scale(8, dpi), theme.surface_alt, theme.line, dpi);
@@ -807,9 +807,9 @@ unsafe fn draw_footer(
         };
         let area = RECT {
             left: scale(32, dpi),
-            top: scale(405, dpi),
+            top: scale(400, dpi),
             right: width - scale(32, dpi),
-            bottom: scale(433, dpi),
+            bottom: scale(424, dpi),
         };
         if let Some(duration) = primary.duration.as_deref() {
             let font_size = scale(12, dpi);
@@ -839,20 +839,6 @@ unsafe fn draw_footer(
                 primary_color,
             );
         }
-        draw_text(
-            hdc,
-            locale,
-            footer_secondary(state, locale),
-            RECT {
-                left: scale(32, dpi),
-                top: scale(431, dpi),
-                right: width - scale(32, dpi),
-                bottom: scale(459, dpi),
-            },
-            scale(12, dpi),
-            FW_NORMAL.0 as i32,
-            theme.muted,
-        );
     }
 }
 
@@ -938,14 +924,6 @@ fn footer_primary(state: &DisplayState, locale: Locale, now: i64) -> FooterLine 
         FooterLine::plain(locale.text("Not enough data to forecast", "数据不足，暂无法预测"))
     } else {
         FooterLine::plain(locale.text("Current pace lasts through reset", "按当前速率可持续至重置"))
-    }
-}
-
-fn footer_secondary(state: &DisplayState, locale: Locale) -> &'static str {
-    if state.snapshot.is_some() {
-        locale.text("Read only from local Codex", "仅从本机 Codex 读取")
-    } else {
-        locale.text("Waiting for Codex", "等待 Codex 数据")
     }
 }
 

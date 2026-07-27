@@ -6,8 +6,7 @@
 
 use super::{
     Locale, RefreshButtonState, Theme, accent_for, accent_red, credit_expiry_text, footer_primary,
-    footer_secondary, pace_label, plan_label, refresh_button_fill, reset_details, rgb,
-    updated_text,
+    pace_label, plan_label, refresh_button_fill, reset_details, rgb, updated_text,
 };
 use crate::insights::analyze_window;
 use crate::model::DisplayState;
@@ -784,16 +783,16 @@ fn draw_background_layer(
         end,
         alpha,
         Vector2 { X: 0.0, Y: 0.0 },
-        Vector2 { X: 420.0, Y: 472.0 },
+        Vector2 { X: 420.0, Y: 440.0 },
     )?;
     unsafe {
-        target.FillRectangle(&rect(0.0, 0.0, 420.0, 472.0), &background);
+        target.FillRectangle(&rect(0.0, 0.0, 420.0, 440.0), &background);
     }
     Ok(())
 }
 
 fn draw_surface_layer(target: &ID2D1DeviceContext, brushes: &Brushes, theme: Theme) -> Result<()> {
-    let hero = rounded_rect(16.0, 64.0, 404.0, 400.0, 8.0);
+    let hero = rounded_rect(16.0, 64.0, 404.0, 392.0, 8.0);
     let hero_gradient = linear_gradient_alpha_pair(
         target,
         theme.surface,
@@ -815,7 +814,7 @@ fn draw_surface_layer(target: &ID2D1DeviceContext, brushes: &Brushes, theme: The
         Vector2 { X: 20.0, Y: 68.0 },
         Vector2 { X: 398.0, Y: 376.0 },
     )?;
-    let facts = rounded_rect(16.0, 315.0, 404.0, 400.0, 8.0);
+    let facts = rounded_rect(16.0, 316.0, 404.0, 392.0, 8.0);
     let fact_brush = solid_brush_alpha(
         target,
         theme.surface_alt,
@@ -881,7 +880,7 @@ fn draw_glass_text_scrims(
     let scrim = solid_brush_alpha(target, scrim_color, if theme.dark { 0.18 } else { 0.20 })?;
     unsafe {
         target.FillRectangle(&rect(0.0, 0.0, 420.0, 64.0), &scrim);
-        target.FillRectangle(&rect(0.0, 400.0, 420.0, 472.0), &scrim);
+        target.FillRectangle(&rect(0.0, 392.0, 420.0, 440.0), &scrim);
     }
     Ok(())
 }
@@ -1151,7 +1150,7 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(16.0, 315.0, 145.0, 400.0),
+            rect(16.0, 316.0, 145.0, 392.0),
             locale.text("Plan", "套餐"),
             &plan,
             None,
@@ -1161,7 +1160,7 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(145.0, 315.0, 274.0, 400.0),
+            rect(145.0, 316.0, 274.0, 392.0),
             locale.text("Session quota", "会话额度"),
             &session,
             None,
@@ -1171,7 +1170,7 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(274.0, 315.0, 404.0, 400.0),
+            rect(274.0, 316.0, 404.0, 392.0),
             locale.text("Reset credits", "重置机会"),
             &credits,
             credit_expiry.as_deref(),
@@ -1182,7 +1181,7 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(16.0, 315.0, 210.0, 400.0),
+            rect(16.0, 316.0, 210.0, 392.0),
             locale.text("Plan", "套餐"),
             &plan,
             None,
@@ -1192,7 +1191,7 @@ fn draw_metrics_content(
             dwrite,
             formats,
             brushes,
-            rect(210.0, 315.0, 404.0, 400.0),
+            rect(210.0, 316.0, 404.0, 392.0),
             locale.text("Reset credits", "重置机会"),
             &credits,
             credit_expiry.as_deref(),
@@ -1253,7 +1252,7 @@ fn draw_footer_content(
     let primary = footer_primary(state, locale, Local::now().timestamp());
     let text = primary.text();
     let text_utf16: Vec<u16> = text.encode_utf16().collect();
-    let layout = unsafe { dwrite.CreateTextLayout(&text_utf16, &formats.footer, 356.0, 28.0)? };
+    let layout = unsafe { dwrite.CreateTextLayout(&text_utf16, &formats.footer, 356.0, 24.0)? };
     if let Some(duration) = primary.duration.as_deref() {
         let start = primary.prefix.encode_utf16().count() as u32;
         let length = duration.encode_utf16().count() as u32;
@@ -1272,17 +1271,10 @@ fn draw_footer_content(
         if state.error.is_some() { &brushes.error } else { &brushes.footer_primary };
     unsafe {
         target.DrawTextLayout(
-            Vector2 { X: 32.0, Y: 405.0 },
+            Vector2 { X: 32.0, Y: 400.0 },
             &layout,
             primary_brush,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
-        );
-        draw_text(
-            target,
-            footer_secondary(state, locale),
-            rect(32.0, 431.0, 388.0, 459.0),
-            &formats.footer,
-            &brushes.muted,
         );
     }
     Ok(())
@@ -1594,8 +1586,8 @@ mod tests {
     #[test]
     fn card_geometry_stays_inside_the_logical_surface() {
         for surface in [
-            rounded_rect(16.0, 64.0, 404.0, 400.0, 8.0),
-            rounded_rect(16.0, 315.0, 404.0, 400.0, 8.0),
+            rounded_rect(16.0, 64.0, 404.0, 392.0, 8.0),
+            rounded_rect(16.0, 316.0, 404.0, 392.0, 8.0),
         ] {
             assert!(surface.rect.left >= 0.0);
             assert!(surface.rect.right <= super::super::CARD_WIDTH as f32);
