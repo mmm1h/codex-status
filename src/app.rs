@@ -45,19 +45,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{
     NIF_GUID, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
-    NIIF_RESPECT_QUIET_TIME, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT,
-    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect,
-    Shell_NotifyIconW, ShellExecuteW,
+    NIIF_RESPECT_QUIET_TIME, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_BALLOONSHOW,
+    NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER,
+    Shell_NotifyIconGetRect, Shell_NotifyIconW, ShellExecuteW,
 };
 #[cfg(feature = "diagnostics")]
-use windows::Win32::UI::Shell::{
-    NIN_BALLOONHIDE, NIN_BALLOONSHOW, NIN_BALLOONTIMEOUT, NIN_BALLOONUSERCLICK,
-};
+use windows::Win32::UI::Shell::{NIN_BALLOONHIDE, NIN_BALLOONTIMEOUT, NIN_BALLOONUSERCLICK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, HMENU,
-    IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW, MF_CHECKED, MF_DISABLED, MF_GRAYED,
-    MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassExW,
+    AppendMenuW, CS_HREDRAW, CS_VREDRAW, CheckMenuRadioItem, CreatePopupMenu, CreateWindowExW,
+    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos,
+    GetMessageW, HMENU, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW, MB_ICONWARNING, MB_OK,
+    MESSAGEBOX_STYLE, MF_BYCOMMAND, MF_CHECKED, MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
+    MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassExW,
     RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
     TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
@@ -69,7 +68,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 #[cfg(feature = "diagnostics")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetMenuItemCount, GetMenuItemID, GetMenuState, GetSubMenu, MF_BYCOMMAND,
+    GetMenuItemCount, GetMenuItemID, GetMenuItemInfoW, GetMenuState, GetSubMenu, MENUITEMINFOW,
+    MFT_RADIOCHECK, MIIM_FTYPE,
 };
 use windows::core::{GUID, PCWSTR, w};
 
@@ -103,8 +103,10 @@ const TIMER_WORKING_SET_TRIM: usize = 6;
 const TIMER_STATUS: usize = 7;
 const TIMER_RENDERER_RELEASE: usize = 8;
 const TIMER_REFRESH_ANIMATION: usize = 9;
+const TIMER_TEST_NOTIFICATION_FEEDBACK: usize = 10;
 const REFRESH_ANIMATION_INTERVAL_MS: u32 = 34;
 const REFRESH_ANIMATION_STEP_DEGREES: u16 = 12;
+const TEST_NOTIFICATION_FEEDBACK_MS: u32 = 2_500;
 
 const UPDATE_INITIAL_DELAY_MS: u32 = 90_000;
 const UPDATE_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
@@ -144,6 +146,7 @@ const CMD_PACE_ALERTS: u32 = 138;
 const CMD_RECOVERY_ALERTS: u32 = 139;
 const CMD_STARTUP: u32 = 140;
 const CMD_RELEASES: u32 = 150;
+const CMD_CHECK_UPDATES: u32 = 151;
 const CMD_THEME_SYSTEM: u32 = 160;
 const CMD_THEME_LIGHT: u32 = 161;
 const CMD_THEME_DARK: u32 = 162;
@@ -182,7 +185,36 @@ struct RefreshOutcome {
 }
 
 struct UpdateOutcome {
+    kind: UpdateCheckKind,
     result: Result<Option<updater::StagedUpdate>, updater::UpdateError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateCheckKind {
+    Automatic,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotificationKind {
+    Alert,
+    Test,
+}
+
+impl NotificationKind {
+    const fn respects_quiet_time(self) -> bool {
+        matches!(self, Self::Alert)
+    }
+}
+
+impl UpdateCheckKind {
+    const fn bypasses_daily_throttle(self) -> bool {
+        matches!(self, Self::Manual)
+    }
+
+    const fn records_last_check(self) -> bool {
+        matches!(self, Self::Automatic)
+    }
 }
 
 struct StatusOutcome {
@@ -214,6 +246,8 @@ struct AppState {
     refresh_angle_degrees: u16,
     update_checking: bool,
     pending_update: Option<updater::StagedUpdate>,
+    pending_update_manual: bool,
+    test_notification_pending: bool,
     status_checking: bool,
     service_status: ServiceStatusSnapshot,
     refresh_paused: bool,
@@ -341,6 +375,8 @@ pub fn run() -> Result<(), AppError> {
         refresh_angle_degrees: 0,
         update_checking: false,
         pending_update: None,
+        pending_update_manual: false,
+        test_notification_pending: false,
         status_checking: false,
         service_status: ServiceStatusSnapshot::unavailable(),
         refresh_paused: false,
@@ -488,6 +524,15 @@ unsafe extern "system" fn main_window_proc(
             match message {
                 WM_TRAY => {
                     let event = lparam.0 as u32 & 0xffff;
+                    if event == NIN_BALLOONSHOW && state.test_notification_pending {
+                        state.test_notification_pending = false;
+                        let _ = KillTimer(Some(hwnd), TIMER_TEST_NOTIFICATION_FEEDBACK);
+                        #[cfg(feature = "diagnostics")]
+                        diagnostic_event(
+                            "test_notification_feedback",
+                            serde_json::json!({ "displayed": true, "fallback": false }),
+                        );
+                    }
                     #[cfg(feature = "diagnostics")]
                     diagnostic_event(
                         "tray_callback",
@@ -576,7 +621,7 @@ unsafe extern "system" fn main_window_proc(
                             if state.pending_update.is_some() {
                                 state.try_apply_update();
                             } else {
-                                state.start_update_check();
+                                state.start_update_check(UpdateCheckKind::Automatic);
                             }
                         }
                         TIMER_WORKING_SET_TRIM => state.trim_working_set(),
@@ -603,6 +648,13 @@ unsafe extern "system" fn main_window_proc(
                                 );
                             } else {
                                 state.stop_refresh_animation();
+                            }
+                        }
+                        TIMER_TEST_NOTIFICATION_FEEDBACK => {
+                            let _ = KillTimer(Some(hwnd), TIMER_TEST_NOTIFICATION_FEEDBACK);
+                            if state.test_notification_pending {
+                                state.test_notification_pending = false;
+                                state.show_test_notification_fallback();
                             }
                         }
                         _ => {}
@@ -924,14 +976,7 @@ impl AppState {
 
     fn schedule_update_check(&self, fallback_delay_ms: u32) {
         let now = Utc::now().timestamp();
-        let delay = self
-            .settings
-            .last_update_check
-            .map(|last| last.saturating_add(UPDATE_INTERVAL_SECONDS).saturating_sub(now))
-            .filter(|seconds| *seconds > 0)
-            .and_then(|seconds| u32::try_from(seconds.saturating_mul(1_000)).ok())
-            .unwrap_or(fallback_delay_ms)
-            .max(1_000);
+        let delay = automatic_update_delay(self.settings.last_update_check, now, fallback_delay_ms);
         self.reset_update_timer(delay);
     }
 
@@ -942,9 +987,14 @@ impl AppState {
         }
     }
 
-    fn start_update_check(&mut self) {
+    fn start_update_check(&mut self, kind: UpdateCheckKind) {
         if self.update_checking || self.pending_update.is_some() {
             return;
+        }
+        if kind.bypasses_daily_throttle() {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_UPDATE);
+            }
         }
         self.update_checking = true;
         let hwnd_value = self.hwnd.0 as isize;
@@ -955,7 +1005,7 @@ impl AppState {
             .spawn(move || {
                 let hwnd = HWND(hwnd_value as *mut std::ffi::c_void);
                 let outcome =
-                    UpdateOutcome { result: updater::check_and_stage(&updates_directory) };
+                    UpdateOutcome { kind, result: updater::check_and_stage(&updates_directory) };
                 let raw = Box::into_raw(Box::new(outcome));
                 let posted = unsafe {
                     PostMessageW(Some(hwnd), WM_UPDATE_COMPLETE, WPARAM(0), LPARAM(raw as isize))
@@ -966,27 +1016,89 @@ impl AppState {
                     }
                 }
             });
-        if spawn_result.is_err() {
+        if let Err(error) = spawn_result {
             self.update_checking = false;
-            self.reset_update_timer(UPDATE_RETRY_MS);
+            match kind {
+                UpdateCheckKind::Automatic => self.reset_update_timer(UPDATE_RETRY_MS),
+                UpdateCheckKind::Manual => {
+                    self.schedule_update_check(UPDATE_INITIAL_DELAY_MS);
+                    self.show_update_check_failure(&error.to_string());
+                }
+            }
         }
     }
 
     fn finish_update_check(&mut self, outcome: UpdateOutcome) {
         self.update_checking = false;
         self.schedule_working_set_trim();
-        match outcome.result {
-            Ok(update) => {
-                self.settings.last_update_check = Some(Utc::now().timestamp());
-                self.persist_settings();
-                self.pending_update = update;
-                if self.pending_update.is_some() {
-                    self.try_apply_update();
-                } else {
-                    self.reset_update_timer(UPDATE_INTERVAL_SECONDS as u32 * 1_000);
+        debug_assert_eq!(
+            outcome.kind.records_last_check(),
+            outcome.kind == UpdateCheckKind::Automatic
+        );
+        match outcome.kind {
+            UpdateCheckKind::Automatic => match outcome.result {
+                Ok(update) => {
+                    self.settings.last_update_check = Some(Utc::now().timestamp());
+                    self.persist_settings();
+                    self.pending_update = update;
+                    self.pending_update_manual = false;
+                    if self.pending_update.is_some() {
+                        self.try_apply_update();
+                    } else {
+                        self.reset_update_timer(UPDATE_INTERVAL_SECONDS as u32 * 1_000);
+                    }
+                }
+                Err(_) => self.reset_update_timer(UPDATE_RETRY_MS),
+            },
+            UpdateCheckKind::Manual => {
+                self.schedule_update_check(UPDATE_INITIAL_DELAY_MS);
+                match outcome.result {
+                    Ok(Some(update)) => {
+                        #[cfg(feature = "diagnostics")]
+                        diagnostic_event(
+                            "manual_update_check",
+                            serde_json::json!({ "result": "update_found" }),
+                        );
+                        self.show_balloon(
+                            self.locale.text("Update found", "发现新版本"),
+                            self.locale.text(
+                                "The update is ready. CodexStatus will restart to install it.",
+                                "更新已准备好，CodexStatus 将重启并完成安装。",
+                            ),
+                        );
+                        self.pending_update = Some(update);
+                        self.pending_update_manual = true;
+                        self.try_apply_update();
+                    }
+                    Ok(None) => {
+                        #[cfg(feature = "diagnostics")]
+                        diagnostic_event(
+                            "manual_update_check",
+                            serde_json::json!({ "result": "up_to_date" }),
+                        );
+                        self.show_balloon(
+                            self.locale
+                                .text("CodexStatus is up to date", "CodexStatus 已是最新版本"),
+                            &format!(
+                                "{} {}",
+                                self.locale.text("Current version", "当前版本"),
+                                env!("CARGO_PKG_VERSION")
+                            ),
+                        );
+                    }
+                    Err(error) => {
+                        #[cfg(feature = "diagnostics")]
+                        diagnostic_event(
+                            "manual_update_check",
+                            serde_json::json!({
+                                "result": "failed",
+                                "error": error.to_string(),
+                            }),
+                        );
+                        self.show_update_check_failure(&error.to_string());
+                    }
                 }
             }
-            Err(_) => self.reset_update_timer(UPDATE_RETRY_MS),
         }
     }
 
@@ -998,13 +1110,63 @@ impl AppState {
         let Some(update) = self.pending_update.take() else {
             return;
         };
+        let manual = self.pending_update_manual;
+        self.pending_update_manual = false;
         if updater::launch_staged_update(&update).is_ok() {
             unsafe {
                 let _ = DestroyWindow(self.hwnd);
             }
         } else {
             self.reset_update_timer(UPDATE_RETRY_MS);
+            if manual {
+                self.show_update_check_failure(
+                    self.locale.text(
+                        "The verified update could not be started.",
+                        "已验证的更新无法启动。",
+                    ),
+                );
+            }
         }
+    }
+
+    fn start_manual_update_check(&mut self) {
+        if self.update_checking {
+            self.show_balloon(
+                self.locale.text("Update check in progress", "正在检查更新"),
+                self.locale
+                    .text("Please wait for the current check to finish.", "请等待当前检查完成。"),
+            );
+            return;
+        }
+        if self.pending_update.is_some() {
+            self.pending_update_manual = true;
+            self.show_balloon(
+                self.locale.text("Update ready", "更新已准备好"),
+                self.locale.text(
+                    "CodexStatus will restart to install the verified update.",
+                    "CodexStatus 将重启并安装已验证的更新。",
+                ),
+            );
+            self.try_apply_update();
+            return;
+        }
+        #[cfg(feature = "diagnostics")]
+        diagnostic_event("manual_update_check", serde_json::json!({ "result": "started" }));
+        self.show_balloon(
+            self.locale.text("Checking for updates", "正在检查更新"),
+            self.locale.text(
+                "CodexStatus is checking the latest release.",
+                "CodexStatus 正在检查最新发布版本。",
+            ),
+        );
+        self.start_update_check(UpdateCheckKind::Manual);
+    }
+
+    fn show_update_check_failure(&self, error: &str) {
+        self.show_balloon(
+            self.locale.text("Update check failed", "检查更新失败"),
+            &format!("{}: {error}", self.locale.text("Reason", "原因")),
+        );
     }
 
     fn schedule_working_set_trim(&self) {
@@ -1247,6 +1409,11 @@ impl AppState {
     }
 
     fn show_balloon(&self, title: &str, body: &str) {
+        let _ = self.submit_balloon(title, body, NotificationKind::Alert);
+    }
+
+    fn submit_balloon(&self, title: &str, body: &str, kind: NotificationKind) -> bool {
+        let respect_quiet_time = kind.respects_quiet_time();
         if !self.tray_added {
             #[cfg(feature = "diagnostics")]
             diagnostic_event(
@@ -1256,13 +1423,15 @@ impl AppState {
                     "body": body,
                     "submitted": false,
                     "reason": "tray_not_added",
+                    "respect_quiet_time": respect_quiet_time,
                 }),
             );
-            return;
+            return false;
         }
         let mut data = self.notify_data();
         data.uFlags = NIF_GUID | NIF_INFO;
-        data.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+        data.dwInfoFlags =
+            if respect_quiet_time { NIIF_INFO | NIIF_RESPECT_QUIET_TIME } else { NIIF_INFO };
         copy_utf16(&mut data.szInfoTitle, title);
         copy_utf16(&mut data.szInfo, body);
         let submitted = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool();
@@ -1273,10 +1442,60 @@ impl AppState {
                 "title": title,
                 "body": body,
                 "submitted": submitted,
+                "respect_quiet_time": respect_quiet_time,
             }),
         );
-        #[cfg(not(feature = "diagnostics"))]
-        let _ = submitted;
+        submitted
+    }
+
+    fn show_test_notification(&mut self) {
+        self.test_notification_pending = true;
+        let submitted = self.submit_balloon(
+            self.locale.text("CodexStatus notification", "CodexStatus 通知"),
+            self.locale.text(
+                "Notifications are working. No quota setting was changed.",
+                "通知工作正常，未修改任何额度设置。",
+            ),
+            NotificationKind::Test,
+        );
+        if !submitted {
+            self.test_notification_pending = false;
+            self.show_test_notification_fallback();
+            return;
+        }
+        let timer = unsafe {
+            SetTimer(
+                Some(self.hwnd),
+                TIMER_TEST_NOTIFICATION_FEEDBACK,
+                TEST_NOTIFICATION_FEEDBACK_MS,
+                None,
+            )
+        };
+        if timer == 0 {
+            self.test_notification_pending = false;
+            self.show_test_notification_fallback();
+        }
+    }
+
+    fn show_test_notification_fallback(&self) {
+        #[cfg(feature = "diagnostics")]
+        diagnostic_event(
+            "test_notification_feedback",
+            serde_json::json!({ "displayed": false, "fallback": true }),
+        );
+        let title = wide0(self.locale.text("Test notification was not shown", "测试通知未显示"));
+        let body = wide0(self.locale.text(
+            "Windows did not display the notification. Check system notification settings or policy.",
+            "Windows 未显示通知，请检查系统通知设置或策略。",
+        ));
+        unsafe {
+            let _ = MessageBoxW(
+                Some(self.hwnd),
+                PCWSTR(body.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MESSAGEBOX_STYLE(MB_OK.0 | MB_ICONWARNING.0),
+            );
+        }
     }
 
     fn maybe_alerts(&mut self) {
@@ -1606,6 +1825,12 @@ impl AppState {
                 self.locale.text("Every 15 minutes", "每 15 分钟"),
                 self.settings.refresh_minutes == 15,
             )?;
+            let selected_interval = match self.settings.refresh_minutes {
+                1 => CMD_INTERVAL_1,
+                15 => CMD_INTERVAL_15,
+                _ => CMD_INTERVAL_5,
+            };
+            radio_group(interval_menu, CMD_INTERVAL_1, CMD_INTERVAL_15, selected_interval)?;
             append_submenu(menu, interval_menu, self.locale.text("Refresh interval", "刷新间隔"))?;
 
             let tray_menu = CreatePopupMenu()?;
@@ -1627,6 +1852,12 @@ impl AppState {
                 self.locale.text("Lower of both", "显示较低值"),
                 self.settings.tray_metric == "lowest",
             )?;
+            let selected_tray_metric = match self.settings.tray_metric.as_str() {
+                "session" => CMD_TRAY_SESSION,
+                "lowest" => CMD_TRAY_LOWEST,
+                _ => CMD_TRAY_WEEKLY,
+            };
+            radio_group(tray_menu, CMD_TRAY_WEEKLY, CMD_TRAY_LOWEST, selected_tray_metric)?;
             append_submenu(menu, tray_menu, self.locale.text("Tray display", "托盘显示"))?;
 
             let alert_menu = CreatePopupMenu()?;
@@ -1650,6 +1881,13 @@ impl AppState {
                     self.settings.alert_threshold == Some(threshold),
                 )?;
             }
+            let selected_weekly_alert = match self.settings.alert_threshold {
+                Some(10) => CMD_ALERT_10,
+                Some(20) => CMD_ALERT_20,
+                Some(30) => CMD_ALERT_30,
+                _ => CMD_ALERT_OFF,
+            };
+            radio_group(alert_menu, CMD_ALERT_OFF, CMD_ALERT_30, selected_weekly_alert)?;
             separator(alert_menu)?;
             append_disabled(alert_menu, self.locale.text("5-hour quota", "5 小时额度"))?;
             append(
@@ -1672,6 +1910,18 @@ impl AppState {
                     self.settings.session_alert_threshold == Some(threshold),
                 )?;
             }
+            let selected_session_alert = match self.settings.session_alert_threshold {
+                Some(10) => CMD_SESSION_ALERT_10,
+                Some(20) => CMD_SESSION_ALERT_20,
+                Some(30) => CMD_SESSION_ALERT_30,
+                _ => CMD_SESSION_ALERT_OFF,
+            };
+            radio_group(
+                alert_menu,
+                CMD_SESSION_ALERT_OFF,
+                CMD_SESSION_ALERT_30,
+                selected_session_alert,
+            )?;
             separator(alert_menu)?;
             append(
                 alert_menu,
@@ -1712,6 +1962,12 @@ impl AppState {
                 self.locale.text("Dark", "深色"),
                 self.settings.theme == "dark",
             )?;
+            let selected_theme = match self.settings.theme.as_str() {
+                "light" => CMD_THEME_LIGHT,
+                "dark" => CMD_THEME_DARK,
+                _ => CMD_THEME_SYSTEM,
+            };
+            radio_group(appearance_menu, CMD_THEME_SYSTEM, CMD_THEME_DARK, selected_theme)?;
             separator(appearance_menu)?;
             append(
                 appearance_menu,
@@ -1755,6 +2011,20 @@ impl AppState {
                 startup_enabled,
             )?;
             append(menu, CMD_RELEASES, self.locale.text("Open releases", "打开发布页"), false)?;
+            if self.update_checking || self.pending_update.is_some() {
+                append_command_disabled(
+                    menu,
+                    CMD_CHECK_UPDATES,
+                    self.locale.text("Checking for updates…", "正在检查更新…"),
+                )?;
+            } else {
+                append(
+                    menu,
+                    CMD_CHECK_UPDATES,
+                    self.locale.text("Check for updates now", "立即检查更新"),
+                    false,
+                )?;
+            }
             separator(menu)?;
             append(
                 menu,
@@ -1799,6 +2069,7 @@ impl AppState {
                 CMD_COPY_DIAGNOSTICS => self.copy_to_clipboard(&self.diagnostics_text()),
                 CMD_STATUS_PAGE => self.open_url(STATUS_PAGE_HOME),
                 CMD_RELEASES => self.open_url(RELEASES_URL),
+                CMD_CHECK_UPDATES => self.start_manual_update_check(),
                 CMD_INTERVAL_1 | CMD_INTERVAL_5 | CMD_INTERVAL_15 => {
                     let minutes = match command {
                         CMD_INTERVAL_1 => 1,
@@ -1856,13 +2127,7 @@ impl AppState {
                     let enabled = !self.settings.recovery_alerts;
                     self.update_settings(|settings| settings.recovery_alerts = enabled);
                 }
-                CMD_TEST_NOTIFICATION => self.show_balloon(
-                    self.locale.text("CodexStatus notification", "CodexStatus 通知"),
-                    self.locale.text(
-                        "Notifications are working. No quota setting was changed.",
-                        "通知工作正常，未修改任何额度设置。",
-                    ),
-                ),
+                CMD_TEST_NOTIFICATION => self.show_test_notification(),
                 CMD_TRAY_WEEKLY | CMD_TRAY_SESSION | CMD_TRAY_LOWEST => {
                     let metric = match command {
                         CMD_TRAY_SESSION => "session",
@@ -2083,10 +2348,22 @@ impl AppState {
     }
 
     fn copy_to_clipboard(&self, text: &str) {
-        match write_unicode_text(self.hwnd, text) {
+        let started = Instant::now();
+        let result = write_unicode_text(self.hwnd, text);
+        let elapsed_ms = started.elapsed().as_millis();
+        match result {
             Ok(()) => {
                 #[cfg(feature = "diagnostics")]
-                diagnostic_event("clipboard", serde_json::json!({ "success": true, "text": text }));
+                diagnostic_event(
+                    "clipboard",
+                    serde_json::json!({
+                        "success": true,
+                        "text": text,
+                        "elapsed_ms": elapsed_ms,
+                    }),
+                );
+                #[cfg(not(feature = "diagnostics"))]
+                let _ = elapsed_ms;
                 self.show_balloon(
                     self.locale.text("Copied", "已复制"),
                     self.locale.text("Copied to the clipboard.", "内容已复制到剪贴板。"),
@@ -2100,6 +2377,7 @@ impl AppState {
                         "success": false,
                         "error": error.to_string(),
                         "attempted_text": text,
+                        "elapsed_ms": elapsed_ms,
                     }),
                 );
                 #[cfg(not(feature = "diagnostics"))]
@@ -2231,6 +2509,15 @@ fn save_settings_change(
     Ok(())
 }
 
+fn automatic_update_delay(last_check: Option<i64>, now: i64, fallback_delay_ms: u32) -> u32 {
+    last_check
+        .map(|last| last.saturating_add(UPDATE_INTERVAL_SECONDS).saturating_sub(now))
+        .filter(|seconds| *seconds > 0)
+        .and_then(|seconds| u32::try_from(seconds.saturating_mul(1_000)).ok())
+        .unwrap_or(fallback_delay_ms)
+        .max(1_000)
+}
+
 fn set_alert_threshold(settings: &mut Settings, kind: QuotaKind, threshold: Option<u8>) -> bool {
     let (current, last_reset) = match kind {
         QuotaKind::Weekly => (&mut settings.alert_threshold, &mut settings.last_alert_reset),
@@ -2254,12 +2541,20 @@ unsafe fn diagnostic_menu_items(menu: HMENU) {
             let command = GetMenuItemID(menu, position);
             if command != u32::MAX && command != 0 {
                 let state = GetMenuState(menu, command, MF_BYCOMMAND);
+                let mut info = MENUITEMINFOW {
+                    cbSize: size_of::<MENUITEMINFOW>() as u32,
+                    fMask: MIIM_FTYPE,
+                    ..Default::default()
+                };
+                let radio = GetMenuItemInfoW(menu, command, false, &mut info).is_ok()
+                    && info.fType & MFT_RADIOCHECK == MFT_RADIOCHECK;
                 diagnostic_event(
                     "menu_item",
                     serde_json::json!({
                         "command": command,
                         "checked": state & MF_CHECKED.0 != 0,
                         "enabled": state & (MF_DISABLED.0 | MF_GRAYED.0) == 0,
+                        "radio": radio,
                     }),
                 );
             }
@@ -2283,6 +2578,7 @@ impl Drop for AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_STATUS);
             let _ = KillTimer(Some(self.hwnd), TIMER_RENDERER_RELEASE);
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
+            let _ = KillTimer(Some(self.hwnd), TIMER_TEST_NOTIFICATION_FEEDBACK);
             if self.tray_added {
                 let data = self.notify_data();
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
@@ -2301,6 +2597,31 @@ unsafe fn append(
         let text = wide0(label);
         let flags = if checked { MF_STRING | MF_CHECKED } else { MF_STRING };
         AppendMenuW(menu, flags, command as usize, PCWSTR(text.as_ptr()))
+    }
+}
+
+unsafe fn radio_group(
+    menu: HMENU,
+    first: u32,
+    last: u32,
+    selected: u32,
+) -> windows::core::Result<()> {
+    unsafe { CheckMenuRadioItem(menu, first, last, selected, MF_BYCOMMAND.0) }
+}
+
+unsafe fn append_command_disabled(
+    menu: HMENU,
+    command: u32,
+    label: &str,
+) -> windows::core::Result<()> {
+    unsafe {
+        let text = wide0(label);
+        AppendMenuW(
+            menu,
+            MF_STRING | MF_DISABLED | MF_GRAYED,
+            command as usize,
+            PCWSTR(text.as_ptr()),
+        )
     }
 }
 
@@ -2556,5 +2877,36 @@ mod tests {
         assert!(set_alert_threshold(&mut settings, QuotaKind::Weekly, Some(20)));
         assert_eq!(settings.alert_threshold, Some(20));
         assert_eq!(settings.last_alert_reset, None);
+    }
+
+    #[test]
+    fn manual_update_checks_bypass_throttle_without_recording_daily_state() {
+        assert!(UpdateCheckKind::Manual.bypasses_daily_throttle());
+        assert!(!UpdateCheckKind::Manual.records_last_check());
+        assert!(!UpdateCheckKind::Automatic.bypasses_daily_throttle());
+        assert!(UpdateCheckKind::Automatic.records_last_check());
+    }
+
+    #[test]
+    fn only_test_notifications_bypass_quiet_time() {
+        assert!(NotificationKind::Alert.respects_quiet_time());
+        assert!(!NotificationKind::Test.respects_quiet_time());
+    }
+
+    #[test]
+    fn automatic_update_delay_still_uses_the_daily_timestamp() {
+        let now = 1_000_000;
+        assert_eq!(
+            automatic_update_delay(Some(now - 60), now, UPDATE_INITIAL_DELAY_MS),
+            (UPDATE_INTERVAL_SECONDS as u32 - 60) * 1_000
+        );
+        assert_eq!(
+            automatic_update_delay(
+                Some(now - UPDATE_INTERVAL_SECONDS),
+                now,
+                UPDATE_INITIAL_DELAY_MS
+            ),
+            UPDATE_INITIAL_DELAY_MS
+        );
     }
 }

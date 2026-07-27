@@ -403,6 +403,31 @@ mod tests {
     }
 
     #[test]
+    fn rejects_assets_that_violate_download_safety_boundaries() {
+        let digest = "a".repeat(64);
+        let base: serde_json::Value = serde_json::from_slice(&metadata("v0.2.0", &digest)).unwrap();
+
+        let mut wrong_name = base.clone();
+        wrong_name["assets"][0]["name"] = json!("CodexStatus.exe");
+        assert!(select_asset(&serde_json::to_vec(&wrong_name).unwrap(), "0.1.2").is_err());
+
+        let mut wrong_url = base.clone();
+        wrong_url["assets"][0]["browser_download_url"] =
+            json!("https://example.com/CodexStatus-v0.2.0-windows-x64.exe");
+        assert!(select_asset(&serde_json::to_vec(&wrong_url).unwrap(), "0.1.2").is_err());
+
+        let mut traversal_url = base.clone();
+        traversal_url["assets"][0]["browser_download_url"] = json!(
+            "https://github.com/mmm1h/codex-status/releases/download/v0.2.0/../CodexStatus.exe"
+        );
+        assert!(select_asset(&serde_json::to_vec(&traversal_url).unwrap(), "0.1.2").is_err());
+
+        let mut oversized = base;
+        oversized["assets"][0]["size"] = json!(MAX_EXECUTABLE_BYTES as u64 + 1);
+        assert!(select_asset(&serde_json::to_vec(&oversized).unwrap(), "0.1.2").is_err());
+    }
+
+    #[test]
     fn parses_only_plain_three_part_versions() {
         assert_eq!(parse_version("10.2.31"), Some((10, 2, 31)));
         assert_eq!(parse_version("1.2"), None);

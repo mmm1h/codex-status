@@ -6,6 +6,8 @@
 
 use std::mem::size_of;
 use std::ptr;
+use std::thread;
+use std::time::Duration;
 
 use windows::Win32::Foundation::{
     ERROR_SUCCESS, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, SetLastError, WIN32_ERROR,
@@ -30,6 +32,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 // avoids enabling the much larger Win32_System_Ole projection only for this
 // constant.
 const CF_UNICODETEXT_FORMAT: u32 = 13;
+const CLIPBOARD_OPEN_ATTEMPTS: usize = 5;
+const CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(25);
 
 /// Errors that can occur while copying text to the Windows clipboard.
 #[derive(Debug, thiserror::Error)]
@@ -64,7 +68,7 @@ pub fn write_unicode_text(owner: HWND, text: &str) -> Result<(), ClipboardError>
     let mut memory = OwnedGlobalMemory::allocate(byte_len)?;
     memory.write_utf16(&encoded)?;
 
-    let _clipboard = OpenClipboardGuard::open(owner)?;
+    let _clipboard = open_clipboard_with_retry(owner)?;
     unsafe {
         EmptyClipboard()?;
         SetClipboardData(CF_UNICODETEXT_FORMAT, Some(HANDLE(memory.handle().0)))?;
@@ -73,6 +77,35 @@ pub fn write_unicode_text(owner: HWND, text: &str) -> Result<(), ClipboardError>
     // SetClipboardData transfers ownership only after it reports success.
     memory.release_to_system();
     Ok(())
+}
+
+fn open_clipboard_with_retry(owner: HWND) -> windows::core::Result<OpenClipboardGuard> {
+    retry_with_delay(
+        || OpenClipboardGuard::open(owner),
+        CLIPBOARD_OPEN_ATTEMPTS,
+        CLIPBOARD_RETRY_DELAY,
+        thread::sleep,
+    )
+}
+
+fn retry_with_delay<T, E>(
+    mut operation: impl FnMut() -> Result<T, E>,
+    attempts: usize,
+    delay: Duration,
+    mut sleep: impl FnMut(Duration),
+) -> Result<T, E> {
+    assert!(attempts > 0);
+    let mut attempted = 1;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if attempted == attempts => return Err(error),
+            Err(_) => {
+                sleep(delay);
+                attempted += 1;
+            }
+        }
+    }
 }
 
 fn encode_unicode_text(text: &str) -> Result<Vec<u16>, ClipboardError> {
@@ -335,6 +368,40 @@ mod tests {
     #[test]
     fn embedded_nul_is_rejected_instead_of_silently_truncating() {
         assert!(matches!(encode_unicode_text("before\0after"), Err(ClipboardError::EmbeddedNul)));
+    }
+
+    #[test]
+    fn clipboard_retry_is_bounded_and_stops_after_success() {
+        let mut calls = 0;
+        let mut delays = Vec::new();
+        let result = retry_with_delay(
+            || {
+                calls += 1;
+                if calls < 3 { Err("busy") } else { Ok("copied") }
+            },
+            CLIPBOARD_OPEN_ATTEMPTS,
+            CLIPBOARD_RETRY_DELAY,
+            |delay| delays.push(delay),
+        );
+        assert_eq!(result, Ok("copied"));
+        assert_eq!(calls, 3);
+        assert_eq!(delays, vec![CLIPBOARD_RETRY_DELAY; 2]);
+    }
+
+    #[test]
+    fn clipboard_retry_returns_the_last_error_after_the_limit() {
+        let mut calls = 0;
+        let result = retry_with_delay(
+            || {
+                calls += 1;
+                Err::<(), _>(calls)
+            },
+            CLIPBOARD_OPEN_ATTEMPTS,
+            CLIPBOARD_RETRY_DELAY,
+            |_| {},
+        );
+        assert_eq!(result, Err(CLIPBOARD_OPEN_ATTEMPTS));
+        assert_eq!(calls, CLIPBOARD_OPEN_ATTEMPTS);
     }
 
     #[test]

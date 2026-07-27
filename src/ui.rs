@@ -196,15 +196,48 @@ pub fn show_fatal_error(message: &str) {
 }
 
 pub fn tray_percent(state: &DisplayState, metric: &str) -> Option<u8> {
+    tray_metric_value(state, metric).map(|value| value.percent)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayMetricSource {
+    Weekly,
+    Session,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrayMetricValue {
+    percent: u8,
+    source: TrayMetricSource,
+}
+
+fn tray_metric_value(state: &DisplayState, metric: &str) -> Option<TrayMetricValue> {
     let weekly = state.weekly_percent();
     let session = state.session_percent();
     match metric {
-        "session" => session.or(weekly),
+        "session" => session
+            .map(|percent| TrayMetricValue { percent, source: TrayMetricSource::Session })
+            .or_else(|| {
+                weekly.map(|percent| TrayMetricValue { percent, source: TrayMetricSource::Weekly })
+            }),
         "lowest" => match (weekly, session) {
-            (Some(weekly), Some(session)) => Some(weekly.min(session)),
-            (weekly, session) => weekly.or(session),
+            (Some(weekly), Some(session)) if session < weekly => {
+                Some(TrayMetricValue { percent: session, source: TrayMetricSource::Session })
+            }
+            (Some(weekly), Some(_)) | (Some(weekly), None) => {
+                Some(TrayMetricValue { percent: weekly, source: TrayMetricSource::Weekly })
+            }
+            (None, Some(session)) => {
+                Some(TrayMetricValue { percent: session, source: TrayMetricSource::Session })
+            }
+            (None, None) => None,
         },
-        _ => weekly.or(session),
+        _ => weekly
+            .map(|percent| TrayMetricValue { percent, source: TrayMetricSource::Weekly })
+            .or_else(|| {
+                session
+                    .map(|percent| TrayMetricValue { percent, source: TrayMetricSource::Session })
+            }),
     }
 }
 
@@ -215,18 +248,41 @@ pub fn tooltip_for_metric(state: &DisplayState, locale: Locale, metric: &str) ->
         RefreshState::Cached => locale.text("cached", "缓存"),
         RefreshState::Unavailable => locale.text("unavailable", "不可用"),
     };
-    let label = match metric {
-        "session" if state.session_percent().is_some() => {
-            locale.text("5-hour remaining", "5 小时剩余")
-        }
-        "lowest" if state.weekly_percent().is_some() && state.session_percent().is_some() => {
+    let Some(value) = tray_metric_value(state, metric) else {
+        let unavailable = match metric {
+            "session" => locale.text("5-hour quota unavailable", "5 小时额度不可用"),
+            "lowest" => locale.text("quota windows unavailable", "额度窗口不可用"),
+            _ => locale.text("weekly quota unavailable", "周额度不可用"),
+        };
+        return format!("CodexStatus · {unavailable} · {status}");
+    };
+    let label = match (metric, value.source) {
+        ("lowest", _) if state.weekly_percent().is_some() && state.session_percent().is_some() => {
             locale.text("lowest remaining", "较低额度剩余")
         }
-        _ => locale.text("weekly remaining", "周剩余"),
+        (_, TrayMetricSource::Session) => locale.text("5-hour remaining", "5 小时剩余"),
+        (_, TrayMetricSource::Weekly) => locale.text("weekly remaining", "周剩余"),
     };
-    match tray_percent(state, metric) {
-        Some(percent) => format!("CodexStatus · {label} {percent}% · {status}",),
-        None => format!("CodexStatus · {status}"),
+    let fallback = match (metric, value.source) {
+        ("session", TrayMetricSource::Weekly) => {
+            Some(locale.text("5-hour unavailable; showing weekly", "5 小时不可用，当前显示周额度"))
+        }
+        ("lowest", TrayMetricSource::Weekly) if state.session_percent().is_none() => {
+            Some(locale.text("5-hour unavailable; showing weekly", "5 小时不可用，当前显示周额度"))
+        }
+        ("lowest", TrayMetricSource::Session) if state.weekly_percent().is_none() => {
+            Some(locale.text("weekly unavailable; showing 5-hour", "周额度不可用，当前显示 5 小时"))
+        }
+        (_, TrayMetricSource::Session) if state.weekly_percent().is_none() => {
+            Some(locale.text("weekly unavailable; showing 5-hour", "周额度不可用，当前显示 5 小时"))
+        }
+        _ => None,
+    };
+    match fallback {
+        Some(fallback) => {
+            format!("CodexStatus · {label} {}% · {status} · {fallback}", value.percent)
+        }
+        None => format!("CodexStatus · {label} {}% · {status}", value.percent),
     }
 }
 
@@ -1386,6 +1442,18 @@ mod tests {
         assert_eq!(tray_percent(&state, "weekly"), Some(65));
         assert_eq!(tray_percent(&state, "session"), Some(22));
         assert_eq!(tray_percent(&state, "lowest"), Some(22));
+    }
+
+    #[test]
+    fn tray_tooltip_discloses_window_fallbacks() {
+        let weekly_only = weekly_state(35.0, 0, Some(100));
+        let session_tooltip = tooltip_for_metric(&weekly_only, Locale::English, "session");
+        assert!(session_tooltip.contains("weekly remaining 65%"));
+        assert!(session_tooltip.contains("5-hour unavailable; showing weekly"));
+
+        let lowest_tooltip = tooltip_for_metric(&weekly_only, Locale::Chinese, "lowest");
+        assert!(lowest_tooltip.contains("周剩余 65%"));
+        assert!(lowest_tooltip.contains("5 小时不可用，当前显示周额度"));
     }
 
     #[test]

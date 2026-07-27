@@ -9,6 +9,11 @@ All notable changes to CodexStatus are documented here.
 - Stop reselecting the current alert threshold from clearing the deduplication state and re-firing an alert that was already delivered.
 - Surface previously silent failures when unregistering the global shortcut, saving the shortcut at startup, and redrawing the tray icon on request.
 - Rename the releases menu item to describe what it does; it opens the releases page and never checked for a new version.
+- Add a "Check for updates now" command that runs the existing verified update path on demand, bypassing only the once-a-day throttle and never the asset, size, or SHA-256 checks.
+- Say in the tray tooltip which window a reading actually came from when the selected metric has no data, instead of quietly substituting the weekly value.
+- Draw the mutually exclusive menu groups as radio items and leave the on/off items as check marks, matching what each group actually means.
+- Let the test notification through Quiet Hours, since its whole purpose is to prove notifications arrive; real quota alerts still respect it.
+- Retry a busy clipboard briefly before reporting that a copy failed.
 
 ## [0.5.0] - 2026-07-28
 
