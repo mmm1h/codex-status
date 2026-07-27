@@ -2,7 +2,7 @@
 
 All notable changes to CodexStatus are documented here.
 
-## [Unreleased]
+## [0.5.0] - 2026-07-28
 
 - Move the flyout from `ID2D1HwndRenderTarget` to D3D11, an `ID2D1DeviceContext`, and a premultiplied DirectComposition swapchain, with grayscale-antialiased text on transparent surfaces.
 - Add live Windows acrylic through `SetWindowCompositionAttribute`, with opaque rendering used for high contrast, disabled transparency effects, Remote Desktop, composition API failures, and graphics initialization or drawing failures; retain GDI as the final fallback.
@@ -16,9 +16,11 @@ All notable changes to CodexStatus are documented here.
 - Spin the refresh glyph while a refresh is in flight, repainting only the button and stopping the timer as soon as the refresh ends or the flyout hides.
 - Enlarge the tray digits and thicken the status rule so the reading survives at 16 px, and move its palette onto the same desaturated green, amber, and red.
 - Read the plan identity from the Codex rate-limit bucket before the broader account token, and label plans the way the official Codex CLI does: `prolite` as Pro Lite, `pro` as Pro, `team` as Business, and `business` as Enterprise. Earlier releases labelled organisation plans one tier low.
-- State the projected weekly depletion time on the pace line when usage is clearly ahead of pace, keeping the local-read privacy note in the footer.
+- Give the footer over to the burn-rate projection and drop the local-read note from it; the privacy boundary is still described in the README and the tray diagnostics.
 - Keep flyout graphics devices available for quick reopening, then release the complete graphics stack after more than three minutes of inactivity.
 - Extend the existing `windows` crate feature set for Direct3D 11, DXGI, and DirectComposition without adding a new third-party crate.
+
+Known limitations of this release: the new graphics stack was developed and verified on Windows 11 24H2 with two 100% scaling displays. Windows 10, mixed-DPI multi-monitor setups, high contrast toggled at the system level, and software (WARP) rendering were exercised through forced code paths rather than on real hardware. Acrylic depends on an undocumented Windows API, so a future Windows update could disable it; every failure path falls back to opaque rendering and then to GDI, and quota reading is unaffected either way.
 
 ## [0.4.0] - 2026-07-27
 
