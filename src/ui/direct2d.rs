@@ -9,7 +9,10 @@
 //! quiet privacy footer. FORM: the user-pinned Stitch “Compact Glass” reference;
 //! no randomized composition was used.
 
-use super::{Locale, Theme, footer_text, plan_label, reset_details, rgb, updated_text};
+use super::{
+    Locale, Theme, UsageProjection, footer_text, plan_label, projection_label, reset_details, rgb,
+    updated_text, weekly_usage_projection,
+};
 use crate::insights::analyze_window;
 use crate::model::DisplayState;
 use chrono::Local;
@@ -1085,10 +1088,15 @@ fn draw_quota_track(
         }
     }
 
-    let mut pace_text = locale.text("Waiting for usage pace", "等待用量节奏数据");
-    let mut pace_warning = false;
-    if let Some(window) = state.snapshot.as_ref().and_then(|snapshot| snapshot.weekly.as_ref()) {
-        let insight = analyze_window(window, Local::now().timestamp());
+    let now = Local::now().timestamp();
+    let pace_insight = state
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| {
+            snapshot.weekly.as_ref().map(|window| analyze_window(window, snapshot.fetched_at))
+        })
+        .filter(|insight| insight.reset_at.is_some_and(|reset_at| reset_at > now));
+    if let Some(insight) = pace_insight {
         if let Some(elapsed) = insight.elapsed_percent {
             let expected_remaining = (100.0 - elapsed).clamp(0.0, 100.0) as f32;
             let marker = left + (right - left) * expected_remaining / 100.0;
@@ -1101,21 +1109,30 @@ fn draw_quota_track(
                     None::<&ID2D1StrokeStyle>,
                 );
             }
-            pace_warning = insight.is_ahead_of_pace && insight.likely_exhaust_before_reset;
-            pace_text = if pace_warning {
-                locale.text("Usage pace high · may run out early", "用量偏快 · 可能提前耗尽")
-            } else {
-                locale.text("Usage pace on track", "用量节奏正常")
-            };
         }
     }
+    let projection = weekly_usage_projection(state, now);
+    let pace_text = projection.map_or_else(
+        || {
+            if pace_insight.is_some_and(|insight| insight.elapsed_percent.is_some()) {
+                locale.text("Usage pace on track", "用量节奏正常").to_owned()
+            } else {
+                locale.text("Waiting for usage pace", "等待用量节奏数据").to_owned()
+            }
+        },
+        |value| projection_label(value, locale).text,
+    );
     unsafe {
         draw_text(
             target,
-            pace_text,
+            &pace_text,
             rect(34.0, 221.0, 386.0, 263.0),
             &formats.pace,
-            if pace_warning { &brushes.warning } else { &brushes.text },
+            match projection {
+                Some(UsageProjection::Exhausted) => &brushes.error,
+                Some(UsageProjection::DepletesIn { .. }) => &brushes.warning,
+                None => &brushes.text,
+            },
         );
     }
     Ok(())
@@ -1135,13 +1152,9 @@ fn draw_metrics_content(
         .as_ref()
         .and_then(|snapshot| snapshot.session.as_ref())
         .map(|window| format!("{}%", window.display_percent()));
-    let plan = state
-        .snapshot
-        .as_ref()
-        .and_then(|snapshot| snapshot.account.plan_type.as_deref())
-        .map(plan_label)
-        .unwrap_or("--")
-        .to_owned();
+    let plan_type =
+        state.snapshot.as_ref().and_then(|snapshot| snapshot.account.plan_type.as_deref());
+    let plan = plan_type.map(|plan| plan_label(plan, locale)).unwrap_or("--").to_owned();
     let credits = state
         .snapshot
         .as_ref()
@@ -1156,6 +1169,7 @@ fn draw_metrics_content(
             formats,
             brushes,
             rect(17.0, 295.0, 146.0, 389.0),
+            plan_type,
             &plan,
             theme,
         )?;
@@ -1182,6 +1196,7 @@ fn draw_metrics_content(
             formats,
             brushes,
             rect(17.0, 295.0, 220.0, 389.0),
+            plan_type,
             &plan,
             theme,
         )?;
@@ -1224,12 +1239,14 @@ fn draw_metric(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_plan_metric(
     target: &ID2D1DeviceContext,
     dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
     area: D2D_RECT_F,
+    plan_type: Option<&str>,
     plan: &str,
     theme: Theme,
 ) -> Result<()> {
@@ -1247,6 +1264,7 @@ fn draw_plan_metric(
         dwrite,
         formats,
         brushes,
+        plan_type,
         plan,
         area.left + 17.0,
         area.top + 43.0,
@@ -1261,27 +1279,23 @@ fn draw_plan_badge(
     dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
+    plan_type: Option<&str>,
     plan: &str,
     x: f32,
     y: f32,
     max_width: f32,
     theme: Theme,
 ) -> Result<()> {
-    let tier = match plan.to_ascii_lowercase().as_str() {
-        "free" => 1_u8,
-        "go" => 2,
-        "plus" => 3,
-        "pro" => 4,
-        _ => 0,
-    };
+    let tier = plan_badge_tier(plan_type);
     let text_width = text_width(dwrite, plan, &formats.badge, max_width, 32.0)?;
     let width = (text_width + 46.0).clamp(66.0, max_width);
     let badge = rounded_rect(x, y, x + width, y + 32.0, 11.0);
     let (start, end, start_alpha, end_alpha) = match tier {
         1 => (theme.surface_alt, theme.surface, 0.72, 0.48),
         2 => (rgb(36, 150, 121), rgb(67, 196, 154), 0.78, 0.58),
-        3 => (rgb(86, 83, 196), rgb(145, 96, 211), 0.82, 0.64),
-        4 => (rgb(37, 43, 68), rgb(111, 72, 165), 0.90, 0.70),
+        3 => (rgb(44, 112, 186), rgb(77, 145, 218), 0.82, 0.64),
+        4 => (rgb(86, 83, 196), rgb(145, 96, 211), 0.86, 0.68),
+        5 => (rgb(37, 43, 68), rgb(111, 72, 165), 0.90, 0.70),
         _ => (theme.surface_alt, theme.surface, 0.66, 0.44),
     };
     if theme.high_contrast {
@@ -1307,14 +1321,15 @@ fn draw_plan_badge(
     let chip_foreground = solid_brush(target, rgb(250, 252, 250))?;
     let marker_brush =
         if theme.high_contrast || tier <= 1 { &brushes.text } else { &chip_foreground };
-    for index in 0..4 {
-        let cx = x + 10.0 + index as f32 * 4.2;
-        let dot = ellipse(cx, y + 16.0, 1.45);
+    for index in 0..5 {
+        let left = x + 9.0 + index as f32 * 3.6;
+        let height = 4.0 + index as f32 * 1.8;
+        let marker = rounded_rect(left, y + 22.0 - height, left + 2.2, y + 22.0, 1.1);
         unsafe {
             if tier == 0 || index >= tier {
-                target.DrawEllipse(&dot, marker_brush, 0.9, None::<&ID2D1StrokeStyle>);
+                target.DrawRoundedRectangle(&marker, marker_brush, 0.8, None::<&ID2D1StrokeStyle>);
             } else {
-                target.FillEllipse(&dot, marker_brush);
+                target.FillRoundedRectangle(&marker, marker_brush);
             }
         }
     }
@@ -1322,12 +1337,23 @@ fn draw_plan_badge(
         draw_text(
             target,
             plan,
-            rect(x + 28.0, y - 1.0, x + width - 7.0, y + 33.0),
+            rect(x + 31.0, y - 1.0, x + width - 7.0, y + 33.0),
             &formats.badge,
             if theme.high_contrast || tier <= 1 { &brushes.text } else { &chip_foreground },
         );
     }
     Ok(())
+}
+
+fn plan_badge_tier(plan_type: Option<&str>) -> u8 {
+    match plan_type.map(str::to_ascii_lowercase).as_deref() {
+        Some("free") => 1_u8,
+        Some("go") => 2,
+        Some("plus") => 3,
+        Some("prolite") => 4,
+        Some("pro") => 5,
+        _ => 0,
+    }
 }
 
 fn draw_footer_content(
@@ -1680,5 +1706,16 @@ mod tests {
             assert!(surface.rect.right <= super::super::CARD_WIDTH as f32);
             assert!(surface.rect.bottom <= super::super::CARD_HEIGHT as f32);
         }
+    }
+
+    #[test]
+    fn plan_badge_tiers_cover_personal_plans_and_keep_unknown_fallback() {
+        assert_eq!(plan_badge_tier(Some("free")), 1);
+        assert_eq!(plan_badge_tier(Some("go")), 2);
+        assert_eq!(plan_badge_tier(Some("plus")), 3);
+        assert_eq!(plan_badge_tier(Some("prolite")), 4);
+        assert_eq!(plan_badge_tier(Some("pro")), 5);
+        assert_eq!(plan_badge_tier(Some("enterprise")), 0);
+        assert_eq!(plan_badge_tier(None), 0);
     }
 }

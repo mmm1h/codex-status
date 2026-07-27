@@ -432,9 +432,15 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 );
             }
         }
-        if let Some(window) = state.snapshot.as_ref().and_then(|snapshot| snapshot.weekly.as_ref())
-        {
-            let insight = analyze_window(window, Local::now().timestamp());
+        let now = Local::now().timestamp();
+        let pace_insight = state
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot.weekly.as_ref().map(|window| analyze_window(window, snapshot.fetched_at))
+            })
+            .filter(|insight| insight.reset_at.is_some_and(|reset_at| reset_at > now));
+        if let Some(insight) = pace_insight {
             if let Some(elapsed) = insight.elapsed_percent {
                 let expected_remaining = (100.0 - elapsed).clamp(0.0, 100.0);
                 let marker = bar.left
@@ -449,32 +455,39 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                     },
                     theme.text,
                 );
-                let pace_warning = insight.is_ahead_of_pace && insight.likely_exhaust_before_reset;
-                draw_text(
-                    hdc,
-                    locale,
-                    if pace_warning {
-                        locale
-                            .text("Usage pace high · may run out early", "用量偏快 · 可能提前耗尽")
-                    } else {
-                        locale.text("Usage pace on track", "用量节奏正常")
-                    },
-                    RECT {
-                        left: scale(34, dpi),
-                        top: scale(222, dpi),
-                        right: width - scale(34, dpi),
-                        bottom: scale(259, dpi),
-                    },
-                    scale(14, dpi),
-                    FW_SEMIBOLD.0 as i32,
-                    if pace_warning && !theme.high_contrast {
-                        rgb(210, 134, 0)
-                    } else {
-                        theme.text
-                    },
-                );
             }
         }
+        let projection = weekly_usage_projection(state, now);
+        let pace_text = projection.map_or_else(
+            || {
+                if pace_insight.is_some_and(|insight| insight.elapsed_percent.is_some()) {
+                    locale.text("Usage pace on track", "用量节奏正常").to_owned()
+                } else {
+                    locale.text("Waiting for usage pace", "等待用量节奏数据").to_owned()
+                }
+            },
+            |value| projection_label(value, locale).text,
+        );
+        draw_text(
+            hdc,
+            locale,
+            &pace_text,
+            RECT {
+                left: scale(34, dpi),
+                top: scale(222, dpi),
+                right: width - scale(34, dpi),
+                bottom: scale(259, dpi),
+            },
+            scale(14, dpi),
+            FW_SEMIBOLD.0 as i32,
+            match projection {
+                Some(UsageProjection::Exhausted) if !theme.high_contrast => rgb(211, 64, 73),
+                Some(UsageProjection::DepletesIn { .. }) if !theme.high_contrast => {
+                    rgb(210, 134, 0)
+                }
+                _ => theme.text,
+            },
+        );
 
         let session = state
             .snapshot
@@ -485,7 +498,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.account.plan_type.as_deref())
-            .map(plan_label)
+            .map(|plan| plan_label(plan, locale))
             .unwrap_or("--")
             .to_owned();
         let credits = state
@@ -803,6 +816,57 @@ fn footer_text(state: &DisplayState, locale: Locale) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageProjection {
+    Exhausted,
+    DepletesIn { seconds: i64 },
+}
+
+fn weekly_usage_projection(state: &DisplayState, now: i64) -> Option<UsageProjection> {
+    let snapshot = state.snapshot.as_ref()?;
+    let window = snapshot.weekly.as_ref()?;
+    let insight = analyze_window(window, snapshot.fetched_at);
+    let used_percent = insight.used_percent?;
+    if used_percent >= 100.0 {
+        return Some(UsageProjection::Exhausted);
+    }
+
+    let reset_at = insight.reset_at?;
+    if reset_at <= now || !insight.is_ahead_of_pace || !insight.likely_exhaust_before_reset {
+        return None;
+    }
+    let projected_at = insight.projected_exhaustion_at?;
+    Some(UsageProjection::DepletesIn { seconds: projected_at.saturating_sub(now).max(0) })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectionLabel {
+    text: String,
+}
+
+fn projection_label(projection: UsageProjection, locale: Locale) -> ProjectionLabel {
+    let text = match projection {
+        UsageProjection::Exhausted => locale.text("Quota exhausted", "额度耗尽").to_owned(),
+        UsageProjection::DepletesIn { seconds } => {
+            let total_hours = if seconds <= 0 { 0 } else { seconds.saturating_add(3_599) / 3_600 };
+            let days = total_hours / 24;
+            let hours = total_hours % 24;
+            if locale == Locale::Chinese {
+                if days > 0 {
+                    format!("用量偏快 · 约{days}天{hours}小时后耗尽")
+                } else {
+                    format!("用量偏快 · 约{hours}小时后耗尽")
+                }
+            } else if days > 0 {
+                format!("Pace high · empty in ~{days}d {hours}h")
+            } else {
+                format!("Pace high · empty in ~{hours}h")
+            }
+        }
+    };
+    ProjectionLabel { text }
+}
+
 fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
     let Some(reset) = window.resets_at else {
         return (
@@ -832,12 +896,13 @@ fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
     (countdown, local_time)
 }
 
-pub(crate) fn plan_label(plan: &str) -> &str {
+pub(crate) fn plan_label(plan: &str, locale: Locale) -> &str {
     match plan.to_ascii_lowercase().as_str() {
-        "free" => "Free",
+        "free" => locale.text("Free", "免费"),
         "go" => "Go",
         "plus" => "Plus",
-        "pro" => "Pro",
+        "prolite" => "5x Pro",
+        "pro" => "20x Pro",
         "team" => "Team",
         "business" => "Business",
         "enterprise" => "Enterprise",
@@ -1031,6 +1096,94 @@ mod tests {
     #[test]
     fn uses_one_ui_font_family_in_every_locale() {
         assert_eq!(ui_font_face(Locale::Chinese), ui_font_face(Locale::English));
+    }
+
+    #[test]
+    fn labels_supported_personal_plans() {
+        assert_eq!(plan_label("free", Locale::Chinese), "免费");
+        assert_eq!(plan_label("free", Locale::English), "Free");
+        assert_eq!(plan_label("go", Locale::Chinese), "Go");
+        assert_eq!(plan_label("plus", Locale::Chinese), "Plus");
+        assert_eq!(plan_label("prolite", Locale::Chinese), "5x Pro");
+        assert_eq!(plan_label("pro", Locale::Chinese), "20x Pro");
+    }
+
+    fn weekly_state(used_percent: f64, fetched_at: i64, resets_at: Option<i64>) -> DisplayState {
+        DisplayState::live(QuotaSnapshot {
+            weekly: Some(QuotaWindow {
+                used_percent,
+                remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
+                window_minutes: 10_080,
+                resets_at,
+            }),
+            session: None,
+            account: AccountSummary::default(),
+            fetched_at,
+        })
+    }
+
+    #[test]
+    fn projects_from_the_snapshot_observation_time() {
+        let reset_at = 10_080 * 60;
+        let fetched_at = 24 * 60 * 60;
+        assert_eq!(
+            weekly_usage_projection(&weekly_state(10.0, fetched_at, Some(reset_at)), fetched_at),
+            None
+        );
+        assert_eq!(
+            weekly_usage_projection(
+                &weekly_state(50.0, fetched_at, Some(reset_at)),
+                fetched_at + 60 * 60
+            ),
+            Some(UsageProjection::DepletesIn { seconds: 23 * 60 * 60 })
+        );
+        assert_eq!(
+            weekly_usage_projection(&weekly_state(100.0, fetched_at, None), fetched_at),
+            Some(UsageProjection::Exhausted)
+        );
+    }
+
+    #[test]
+    fn projection_keeps_the_existing_ahead_of_pace_threshold() {
+        let reset_at = 10_080 * 60;
+        let fetched_at = 36 * 60 * 60;
+        assert_eq!(
+            weekly_usage_projection(&weekly_state(22.0, fetched_at, Some(reset_at)), fetched_at),
+            None
+        );
+        let state = weekly_state(22.0, fetched_at, Some(reset_at));
+        let insight = analyze_window(
+            state.snapshot.as_ref().and_then(|snapshot| snapshot.weekly.as_ref()).unwrap(),
+            fetched_at,
+        );
+        assert!(insight.likely_exhaust_before_reset);
+        assert!(!insight.is_ahead_of_pace);
+    }
+
+    #[test]
+    fn localizes_projection_labels() {
+        assert_eq!(
+            projection_label(
+                UsageProjection::DepletesIn { seconds: 25 * 60 * 60 },
+                Locale::Chinese,
+            ),
+            ProjectionLabel { text: "用量偏快 · 约1天1小时后耗尽".to_owned() }
+        );
+        assert_eq!(
+            projection_label(
+                UsageProjection::DepletesIn { seconds: 25 * 60 * 60 },
+                Locale::English,
+            ),
+            ProjectionLabel { text: "Pace high · empty in ~1d 1h".to_owned() }
+        );
+        assert_eq!(
+            projection_label(UsageProjection::Exhausted, Locale::Chinese),
+            ProjectionLabel { text: "额度耗尽".to_owned() }
+        );
+        assert_eq!(
+            projection_label(UsageProjection::Exhausted, Locale::English),
+            ProjectionLabel { text: "Quota exhausted".to_owned() }
+        );
     }
 
     #[test]

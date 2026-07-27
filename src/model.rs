@@ -141,10 +141,10 @@ pub fn parse_snapshot(
         })
         .map(|(_, window)| window.clone());
 
-    let plan_type = account_result
-        .pointer("/account/planType")
+    let plan_type = bucket
+        .get("planType")
         .and_then(Value::as_str)
-        .or_else(|| bucket.get("planType").and_then(Value::as_str))
+        .or_else(|| account_result.pointer("/account/planType").and_then(Value::as_str))
         .map(str::to_owned);
     let reset_credits =
         rate_result.pointer("/rateLimitResetCredits/availableCount").and_then(Value::as_u64);
@@ -227,6 +227,19 @@ mod tests {
         assert_eq!(snapshot.weekly.unwrap().display_percent(), 75);
         assert_eq!(snapshot.session.unwrap().display_percent(), 60);
         assert_eq!(snapshot.account.reset_credits, Some(2));
+    }
+
+    #[test]
+    fn prefers_quota_plan_when_it_differs_from_the_account_token() {
+        let rate = json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "planType": "prolite",
+                "primary": {"usedPercent": 12, "windowDurationMins": 10080}
+            }
+        });
+        let snapshot = parse_snapshot(&account(), &rate, 100).unwrap();
+        assert_eq!(snapshot.account.plan_type.as_deref(), Some("prolite"));
     }
 
     #[test]
