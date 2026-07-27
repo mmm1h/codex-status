@@ -74,6 +74,10 @@ impl DisplayState {
         self.snapshot.as_ref()?.weekly.as_ref().map(QuotaWindow::display_percent)
     }
 
+    pub fn session_percent(&self) -> Option<u8> {
+        self.snapshot.as_ref()?.session.as_ref().map(QuotaWindow::display_percent)
+    }
+
     pub fn live(snapshot: QuotaSnapshot) -> Self {
         Self { snapshot: Some(snapshot), refresh_state: RefreshState::Live, error: None }
     }

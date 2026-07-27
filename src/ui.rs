@@ -1,3 +1,4 @@
+use crate::insights::analyze_window;
 use crate::model::{DisplayState, QuotaWindow, RefreshState};
 use chrono::{DateTime, Local};
 use std::ffi::c_void;
@@ -75,6 +76,21 @@ pub struct Theme {
     text: COLORREF,
     muted: COLORREF,
     line: COLORREF,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServiceHealth {
+    #[default]
+    Unknown,
+    Operational,
+    Degraded,
+    Outage,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CardDecorations {
+    pub pinned: bool,
+    pub service_health: ServiceHealth,
 }
 
 pub fn detect_theme(preference: &str) -> Theme {
@@ -177,24 +193,48 @@ pub fn show_fatal_error(message: &str) {
     }
 }
 
-pub fn tooltip(state: &DisplayState, locale: Locale) -> String {
+pub fn tray_percent(state: &DisplayState, metric: &str) -> Option<u8> {
+    let weekly = state.weekly_percent();
+    let session = state.session_percent();
+    match metric {
+        "session" => session.or(weekly),
+        "lowest" => match (weekly, session) {
+            (Some(weekly), Some(session)) => Some(weekly.min(session)),
+            (weekly, session) => weekly.or(session),
+        },
+        _ => weekly.or(session),
+    }
+}
+
+pub fn tooltip_for_metric(state: &DisplayState, locale: Locale, metric: &str) -> String {
     let status = match state.refresh_state {
         RefreshState::Loading => locale.text("refreshing", "刷新中"),
         RefreshState::Live => locale.text("live", "实时"),
         RefreshState::Cached => locale.text("cached", "缓存"),
         RefreshState::Unavailable => locale.text("unavailable", "不可用"),
     };
-    match state.weekly_percent() {
-        Some(percent) => format!(
-            "CodexStatus · {} {}% · {status}",
-            locale.text("weekly remaining", "周剩余"),
-            percent
-        ),
+    let label = match metric {
+        "session" if state.session_percent().is_some() => {
+            locale.text("5-hour remaining", "5 小时剩余")
+        }
+        "lowest" if state.weekly_percent().is_some() && state.session_percent().is_some() => {
+            locale.text("lowest remaining", "较低额度剩余")
+        }
+        _ => locale.text("weekly remaining", "周剩余"),
+    };
+    match tray_percent(state, metric) {
+        Some(percent) => format!("CodexStatus · {label} {percent}% · {status}",),
         None => format!("CodexStatus · {status}"),
     }
 }
 
-pub fn paint_card(hwnd: HWND, state: &DisplayState, locale: Locale, theme: Theme) {
+pub fn paint_card(
+    hwnd: HWND,
+    state: &DisplayState,
+    locale: Locale,
+    theme: Theme,
+    decorations: CardDecorations,
+) {
     unsafe {
         let mut paint = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut paint);
@@ -208,11 +248,11 @@ pub fn paint_card(hwnd: HWND, state: &DisplayState, locale: Locale, theme: Theme
         let bitmap = CreateCompatibleBitmap(hdc, width, height);
         if !buffer.is_invalid() && !bitmap.is_invalid() {
             let old_bitmap = SelectObject(buffer, HGDIOBJ(bitmap.0));
-            draw_card(buffer, state, locale, theme, dpi);
+            draw_card(buffer, state, locale, theme, decorations, dpi);
             let _ = BitBlt(hdc, 0, 0, width, height, Some(buffer), 0, 0, SRCCOPY);
             let _ = SelectObject(buffer, old_bitmap);
         } else {
-            draw_card(hdc, state, locale, theme, dpi);
+            draw_card(hdc, state, locale, theme, decorations, dpi);
         }
         if !bitmap.is_invalid() {
             let _ = DeleteObject(HGDIOBJ(bitmap.0));
@@ -224,7 +264,14 @@ pub fn paint_card(hwnd: HWND, state: &DisplayState, locale: Locale, theme: Theme
     }
 }
 
-unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme, dpi: u32) {
+unsafe fn draw_card(
+    hdc: HDC,
+    state: &DisplayState,
+    locale: Locale,
+    theme: Theme,
+    decorations: CardDecorations,
+    dpi: u32,
+) {
     unsafe {
         let width = scale(CARD_WIDTH, dpi);
         let height = scale(CARD_HEIGHT, dpi);
@@ -265,13 +312,14 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
             RECT {
                 left: scale(190, dpi),
                 top: scale(8, dpi),
-                right: width - scale(18, dpi),
+                right: width - scale(48, dpi),
                 bottom: scale(40, dpi),
             },
             scale(11, dpi),
             FW_NORMAL.0 as i32,
             theme.muted,
         );
+        draw_pin_button(hdc, decorations.pinned, theme, status_color, dpi);
 
         let hero = RECT {
             left: scale(16, dpi),
@@ -380,12 +428,55 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 );
             }
         }
+        if let Some(window) = state.snapshot.as_ref().and_then(|snapshot| snapshot.weekly.as_ref())
+        {
+            let insight = analyze_window(window, Local::now().timestamp());
+            if let Some(elapsed) = insight.elapsed_percent {
+                let expected_remaining = (100.0 - elapsed).clamp(0.0, 100.0);
+                let marker = bar.left
+                    + ((bar.right - bar.left) as f64 * expected_remaining / 100.0).round() as i32;
+                fill(
+                    hdc,
+                    RECT {
+                        left: marker.saturating_sub(scale(1, dpi)),
+                        top: bar.top - scale(3, dpi),
+                        right: marker + scale(1, dpi).max(1),
+                        bottom: bar.bottom + scale(3, dpi),
+                    },
+                    theme.text,
+                );
+                let pace_warning = insight.is_ahead_of_pace && insight.likely_exhaust_before_reset;
+                draw_text(
+                    hdc,
+                    locale,
+                    if pace_warning {
+                        locale
+                            .text("Usage pace high · may run out early", "用量偏快 · 可能提前耗尽")
+                    } else {
+                        locale.text("Usage pace on track", "用量节奏正常")
+                    },
+                    RECT {
+                        left: scale(30, dpi),
+                        top: scale(156, dpi),
+                        right: width - scale(30, dpi),
+                        bottom: scale(174, dpi),
+                    },
+                    scale(10, dpi),
+                    FW_NORMAL.0 as i32,
+                    if pace_warning && !theme.high_contrast {
+                        rgb(210, 134, 0)
+                    } else {
+                        theme.muted
+                    },
+                );
+            }
+        }
 
         let session = state
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.session.as_ref())
-            .map_or_else(|| "--".to_owned(), |window| format!("{}%", window.display_percent()));
+            .map(|window| format!("{}%", window.display_percent()));
         let plan = state
             .snapshot
             .as_ref()
@@ -407,47 +498,61 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
             bottom: scale(252, dpi),
         };
         outlined_surface(hdc, metrics, scale(12, dpi), theme.surface_alt, theme.line, dpi);
-        for divider in [scale(130, dpi), scale(246, dpi)] {
-            fill(
+        if let Some(session) = session {
+            for divider in [scale(130, dpi), scale(246, dpi)] {
+                draw_metric_divider(hdc, metrics, divider, theme, dpi);
+            }
+            metric_column(
                 hdc,
-                RECT {
-                    left: divider,
-                    top: metrics.top + scale(13, dpi),
-                    right: divider + scale(1, dpi).max(1),
-                    bottom: metrics.bottom - scale(13, dpi),
-                },
-                theme.line,
+                locale,
+                RECT { right: scale(130, dpi), ..metrics },
+                locale.text("5-hour quota", "5 小时额度"),
+                &session,
+                theme,
+                dpi,
+            );
+            metric_column(
+                hdc,
+                locale,
+                RECT { left: scale(131, dpi), right: scale(246, dpi), ..metrics },
+                locale.text("Plan", "套餐"),
+                &plan,
+                theme,
+                dpi,
+            );
+            metric_column(
+                hdc,
+                locale,
+                RECT { left: scale(247, dpi), ..metrics },
+                locale.text("Reset credits", "重置机会"),
+                &credits,
+                theme,
+                dpi,
+            );
+        } else {
+            let divider = scale(CARD_WIDTH / 2, dpi);
+            draw_metric_divider(hdc, metrics, divider, theme, dpi);
+            metric_column(
+                hdc,
+                locale,
+                RECT { right: divider, ..metrics },
+                locale.text("Plan", "套餐"),
+                &plan,
+                theme,
+                dpi,
+            );
+            metric_column(
+                hdc,
+                locale,
+                RECT { left: divider + scale(1, dpi), ..metrics },
+                locale.text("Reset credits", "重置机会"),
+                &credits,
+                theme,
+                dpi,
             );
         }
-        metric_column(
-            hdc,
-            locale,
-            RECT { right: scale(130, dpi), ..metrics },
-            locale.text("5-hour quota", "5 小时额度"),
-            &session,
-            theme,
-            dpi,
-        );
-        metric_column(
-            hdc,
-            locale,
-            RECT { left: scale(131, dpi), right: scale(246, dpi), ..metrics },
-            locale.text("Plan", "套餐"),
-            &plan,
-            theme,
-            dpi,
-        );
-        metric_column(
-            hdc,
-            locale,
-            RECT { left: scale(247, dpi), ..metrics },
-            locale.text("Reset credits", "重置机会"),
-            &credits,
-            theme,
-            dpi,
-        );
 
-        let footer = footer_text(state, locale);
+        let footer = footer_text(state, locale, decorations.service_health);
         draw_text(
             hdc,
             locale,
@@ -460,7 +565,93 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
             },
             scale(11, dpi),
             FW_NORMAL.0 as i32,
-            if state.error.is_some() { status_color } else { theme.muted },
+            if state.error.is_some() {
+                status_color
+            } else {
+                match decorations.service_health {
+                    ServiceHealth::Degraded if !theme.high_contrast => rgb(184, 112, 0),
+                    ServiceHealth::Outage if !theme.high_contrast => rgb(211, 64, 73),
+                    ServiceHealth::Degraded | ServiceHealth::Outage => theme.text,
+                    _ => theme.muted,
+                }
+            },
+        );
+    }
+}
+
+pub fn pin_hit_test(x: i32, y: i32, dpi: u32) -> bool {
+    let rect = pin_rect(dpi);
+    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+}
+
+fn pin_rect(dpi: u32) -> RECT {
+    RECT {
+        left: scale(337, dpi),
+        top: scale(9, dpi),
+        right: scale(361, dpi),
+        bottom: scale(36, dpi),
+    }
+}
+
+unsafe fn draw_pin_button(hdc: HDC, pinned: bool, theme: Theme, accent: COLORREF, dpi: u32) {
+    unsafe {
+        let rect = pin_rect(dpi);
+        outlined_surface(
+            hdc,
+            rect,
+            scale(8, dpi),
+            theme.surface_alt,
+            if pinned { accent } else { theme.line },
+            dpi,
+        );
+        let color = if pinned { accent } else { theme.muted };
+        let center = (rect.left + rect.right) / 2;
+        let unit = scale(1, dpi).max(1);
+        fill_rounded(
+            hdc,
+            RECT {
+                left: center - scale(4, dpi),
+                top: rect.top + scale(7, dpi),
+                right: center + scale(4, dpi),
+                bottom: rect.top + scale(10, dpi),
+            },
+            unit,
+            color,
+        );
+        fill(
+            hdc,
+            RECT {
+                left: center - unit,
+                top: rect.top + scale(9, dpi),
+                right: center + unit,
+                bottom: rect.top + scale(18, dpi),
+            },
+            color,
+        );
+        fill(
+            hdc,
+            RECT {
+                left: center - scale(3, dpi),
+                top: rect.top + scale(13, dpi),
+                right: center + scale(3, dpi),
+                bottom: rect.top + scale(15, dpi),
+            },
+            color,
+        );
+    }
+}
+
+unsafe fn draw_metric_divider(hdc: HDC, metrics: RECT, divider: i32, theme: Theme, dpi: u32) {
+    unsafe {
+        fill(
+            hdc,
+            RECT {
+                left: divider,
+                top: metrics.top + scale(13, dpi),
+                right: divider + scale(1, dpi).max(1),
+                bottom: metrics.bottom - scale(13, dpi),
+            },
+            theme.line,
         );
     }
 }
@@ -602,7 +793,7 @@ fn updated_text(state: &DisplayState, locale: Locale) -> String {
     time.map_or_else(|| prefix.to_owned(), |time| format!("{prefix} {time}"))
 }
 
-fn footer_text(state: &DisplayState, locale: Locale) -> String {
+fn footer_text(state: &DisplayState, locale: Locale, service_health: ServiceHealth) -> String {
     if let Some(error) = state.error.as_deref() {
         let prefix = if state.weekly_percent().is_some() {
             locale.text("Cached · ", "缓存 · ")
@@ -614,10 +805,19 @@ fn footer_text(state: &DisplayState, locale: Locale) -> String {
     if state.refresh_state == RefreshState::Loading {
         return locale.text("Refreshing Codex quota…", "正在刷新 Codex 额度…").to_owned();
     }
-    if state.snapshot.is_some() {
+    let base = if state.snapshot.is_some() {
         locale.text("Read only from local Codex", "仅从本机 Codex 读取").to_owned()
     } else {
         locale.text("Waiting for Codex", "等待 Codex 数据").to_owned()
+    };
+    match service_health {
+        ServiceHealth::Degraded => {
+            format!("{} · {base}", locale.text("OpenAI degraded", "OpenAI 服务降级"))
+        }
+        ServiceHealth::Outage => {
+            format!("{} · {base}", locale.text("OpenAI outage", "OpenAI 服务中断"))
+        }
+        _ => base,
     }
 }
 
@@ -650,7 +850,7 @@ fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
     (countdown, local_time)
 }
 
-fn plan_label(plan: &str) -> &str {
+pub(crate) fn plan_label(plan: &str) -> &str {
     match plan.to_ascii_lowercase().as_str() {
         "plus" => "Plus",
         "pro" => "Pro",
@@ -825,14 +1025,14 @@ fn wide0(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::QuotaWindow;
+    use crate::model::{AccountSummary, QuotaSnapshot, QuotaWindow};
 
     #[test]
     fn localizes_tooltip_status() {
         let state =
             DisplayState { snapshot: None, refresh_state: RefreshState::Unavailable, error: None };
-        assert!(tooltip(&state, Locale::English).contains("unavailable"));
-        assert!(tooltip(&state, Locale::Chinese).contains("不可用"));
+        assert!(tooltip_for_metric(&state, Locale::English, "weekly").contains("unavailable"));
+        assert!(tooltip_for_metric(&state, Locale::Chinese, "weekly").contains("不可用"));
     }
 
     #[test]
@@ -850,5 +1050,35 @@ mod tests {
     #[test]
     fn uses_one_ui_font_family_in_every_locale() {
         assert_eq!(ui_font_face(Locale::Chinese), ui_font_face(Locale::English));
+    }
+
+    #[test]
+    fn tray_metric_can_show_weekly_session_or_the_tighter_window() {
+        let state = DisplayState::live(QuotaSnapshot {
+            weekly: Some(QuotaWindow {
+                used_percent: 35.0,
+                remaining_percent: 65.0,
+                window_minutes: 10_080,
+                resets_at: Some(100),
+            }),
+            session: Some(QuotaWindow {
+                used_percent: 78.0,
+                remaining_percent: 22.0,
+                window_minutes: 300,
+                resets_at: Some(100),
+            }),
+            account: AccountSummary::default(),
+            fetched_at: 0,
+        });
+        assert_eq!(tray_percent(&state, "weekly"), Some(65));
+        assert_eq!(tray_percent(&state, "session"), Some(22));
+        assert_eq!(tray_percent(&state, "lowest"), Some(22));
+    }
+
+    #[test]
+    fn pin_hit_target_scales_with_dpi() {
+        assert!(pin_hit_test(349, 20, 96));
+        assert!(!pin_hit_test(330, 20, 96));
+        assert!(pin_hit_test(698, 40, 192));
     }
 }

@@ -1,9 +1,17 @@
 use crate::app_server::AppServerClient;
-use crate::icon::{OwnedIcon, create_icon, tone_for};
-use crate::model::{DisplayState, QuotaSnapshot, RefreshState};
+use crate::icon::{OwnedIcon, ServiceOverlay, create_icon_with_overlay, tone_for_percent};
+use crate::insights::{AlertTracker, QuotaKind, analyze_window, current_cycle, evaluate_alerts};
+use crate::model::{DisplayState, QuotaSnapshot, QuotaWindow, RefreshState};
 use crate::settings::{AppStore, Settings};
+use crate::status_page::{
+    STATUS_PAGE_HOME, ServiceStatus, ServiceStatusSnapshot, fetch_service_status,
+};
+use crate::windows_helpers::{
+    HotKeyRegistration, PowerBroadcastEvent, SessionChangeEvent, SessionNotificationRegistration,
+    power_broadcast_event, session_change_event, write_unicode_text,
+};
 use crate::{startup, ui, updater};
-use chrono::Utc;
+use chrono::{DateTime, Local, Utc};
 use std::cell::Cell;
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -26,7 +34,7 @@ use windows::Win32::UI::HiDpi::{
     GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::Ime::ImmDisableIME;
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_ESCAPE};
 use windows::Win32::UI::Shell::{
     NIF_GUID, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
     NIIF_RESPECT_QUIET_TIME, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT,
@@ -37,14 +45,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos,
     GetMessageW, HMENU, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW, MF_CHECKED,
-    MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassExW,
-    RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
-    WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
-    WM_NULL, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+    MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage,
+    RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
+    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_HOTKEY,
+    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_PAINT, WM_POWERBROADCAST,
+    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE,
+    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
 };
 use windows::core::{GUID, PCWSTR, w};
 
@@ -59,6 +68,7 @@ const WM_REFRESH_COMPLETE: u32 = WM_APP + 2;
 const WM_SHOW_EXISTING: u32 = WM_APP + 3;
 const WM_TOGGLE_FLYOUT: u32 = WM_APP + 4;
 const WM_UPDATE_COMPLETE: u32 = WM_APP + 5;
+const WM_STATUS_COMPLETE: u32 = WM_APP + 6;
 
 const TIMER_REFRESH: usize = 1;
 const TIMER_STARTUP: usize = 2;
@@ -66,11 +76,16 @@ const TIMER_CARD: usize = 3;
 const TIMER_FLYOUT_ACTIVATE: usize = 4;
 const TIMER_UPDATE: usize = 5;
 const TIMER_WORKING_SET_TRIM: usize = 6;
+const TIMER_STATUS: usize = 7;
 
 const UPDATE_INITIAL_DELAY_MS: u32 = 90_000;
 const UPDATE_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 const UPDATE_RETRY_MS: u32 = 6 * 60 * 60 * 1_000;
 const UPDATE_WORKING_SET_TRIM_MS: u32 = 5_000;
+const STATUS_INITIAL_DELAY_MS: u32 = 15_000;
+const STATUS_INTERVAL_MS: u32 = 15 * 60 * 1_000;
+const STATUS_RETRY_MS: u32 = 30 * 60 * 1_000;
+const GLOBAL_HOTKEY_ID: i32 = 1;
 
 const TRAY_ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(300);
 const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
@@ -78,6 +93,13 @@ const TRAY_CLOSE_COALESCE: Duration = Duration::from_millis(250);
 
 const CMD_REFRESH: u32 = 100;
 const CMD_USAGE: u32 = 101;
+const CMD_COPY_STATUS: u32 = 102;
+const CMD_COPY_DIAGNOSTICS: u32 = 103;
+const CMD_STATUS_PAGE: u32 = 104;
+const CMD_STATUS_CHECKS: u32 = 105;
+const CMD_TEST_NOTIFICATION: u32 = 106;
+const CMD_GLOBAL_HOTKEY: u32 = 107;
+const CMD_PIN_FLYOUT: u32 = 108;
 const CMD_INTERVAL_1: u32 = 111;
 const CMD_INTERVAL_5: u32 = 115;
 const CMD_INTERVAL_15: u32 = 125;
@@ -85,11 +107,20 @@ const CMD_ALERT_OFF: u32 = 130;
 const CMD_ALERT_10: u32 = 131;
 const CMD_ALERT_20: u32 = 132;
 const CMD_ALERT_30: u32 = 133;
+const CMD_SESSION_ALERT_OFF: u32 = 134;
+const CMD_SESSION_ALERT_10: u32 = 135;
+const CMD_SESSION_ALERT_20: u32 = 136;
+const CMD_SESSION_ALERT_30: u32 = 137;
+const CMD_PACE_ALERTS: u32 = 138;
+const CMD_RECOVERY_ALERTS: u32 = 139;
 const CMD_STARTUP: u32 = 140;
 const CMD_RELEASES: u32 = 150;
 const CMD_THEME_SYSTEM: u32 = 160;
 const CMD_THEME_LIGHT: u32 = 161;
 const CMD_THEME_DARK: u32 = 162;
+const CMD_TRAY_WEEKLY: u32 = 170;
+const CMD_TRAY_SESSION: u32 = 171;
+const CMD_TRAY_LOWEST: u32 = 172;
 const CMD_EXIT: u32 = 199;
 
 const USAGE_URL: &str = "https://chatgpt.com/codex/settings/usage";
@@ -125,6 +156,10 @@ struct UpdateOutcome {
     result: Result<Option<updater::StagedUpdate>, updater::UpdateError>,
 }
 
+struct StatusOutcome {
+    result: Result<ServiceStatusSnapshot, String>,
+}
+
 enum LaunchMode {
     Normal,
     Background,
@@ -147,6 +182,12 @@ struct AppState {
     refresh_pending: bool,
     update_checking: bool,
     pending_update: Option<updater::StagedUpdate>,
+    status_checking: bool,
+    service_status: ServiceStatusSnapshot,
+    refresh_paused: bool,
+    alert_tracker: AlertTracker,
+    hotkey: Option<HotKeyRegistration>,
+    session_notifications: Option<SessionNotificationRegistration>,
     failures: u8,
     last_tray_activation: Option<Instant>,
     flyout_ignore_inactive_until: Option<Instant>,
@@ -222,13 +263,31 @@ pub fn run() -> Result<(), AppError> {
     diagnostic("run:windows");
 
     let store = AppStore::discover();
-    let settings = store.load_settings();
+    let mut settings = store.load_settings();
     let locale = ui::Locale::detect(&settings.locale);
     let theme = ui::detect_theme(&settings.theme);
     let now = Utc::now().timestamp();
     let cached = store.load_snapshot().filter(|snapshot| snapshot.is_cache_valid(now));
     let display = DisplayState::loading(cached);
+    let alert_tracker = seed_alert_tracker(&settings, &display, now);
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+    let session_notifications = SessionNotificationRegistration::register(hwnd).ok();
+    let hotkey = if settings.global_hotkey {
+        HotKeyRegistration::register(
+            Some(hwnd),
+            GLOBAL_HOTKEY_ID,
+            MOD_ALT | MOD_CONTROL | MOD_NOREPEAT,
+            u32::from(b'Q'),
+        )
+        .ok()
+    } else {
+        None
+    };
+    let hotkey_failed = settings.global_hotkey && hotkey.is_none();
+    if hotkey_failed {
+        settings.global_hotkey = false;
+        let _ = store.save_settings(&settings);
+    }
     let state = Box::new(AppState {
         hwnd,
         flyout,
@@ -245,6 +304,12 @@ pub fn run() -> Result<(), AppError> {
         refresh_pending: false,
         update_checking: false,
         pending_update: None,
+        status_checking: false,
+        service_status: ServiceStatusSnapshot::unavailable(),
+        refresh_paused: false,
+        alert_tracker,
+        hotkey,
+        session_notifications,
         failures: 0,
         last_tray_activation: None,
         flyout_ignore_inactive_until: None,
@@ -273,6 +338,18 @@ pub fn run() -> Result<(), AppError> {
         let state = &mut *raw;
         state.reset_refresh_timer(state.settings.refresh_minutes.saturating_mul(60_000));
         state.schedule_update_check(UPDATE_INITIAL_DELAY_MS);
+        if state.settings.service_status_checks {
+            state.reset_status_timer(if background { 45_000 } else { STATUS_INITIAL_DELAY_MS });
+        }
+        if hotkey_failed {
+            state.show_balloon(
+                state.locale.text("Shortcut unavailable", "快捷键不可用"),
+                state.locale.text(
+                    "Ctrl+Alt+Q is already used by another app.",
+                    "Ctrl+Alt+Q 已被其他应用占用。",
+                ),
+            );
+        }
         if background {
             let _ = SetTimer(Some(hwnd), TIMER_STARTUP, 30_000, None);
         } else {
@@ -387,6 +464,13 @@ unsafe extern "system" fn main_window_proc(
                     }
                     return LRESULT(0);
                 }
+                WM_STATUS_COMPLETE => {
+                    if lparam.0 != 0 {
+                        let outcome = *Box::from_raw(lparam.0 as *mut StatusOutcome);
+                        state.finish_status_check(outcome);
+                    }
+                    return LRESULT(0);
+                }
                 WM_SHOW_EXISTING => {
                     state.show_flyout();
                     return LRESULT(0);
@@ -415,9 +499,29 @@ unsafe extern "system" fn main_window_proc(
                             }
                         }
                         TIMER_WORKING_SET_TRIM => state.trim_working_set(),
+                        TIMER_STATUS => {
+                            let _ = KillTimer(Some(hwnd), TIMER_STATUS);
+                            state.start_status_check();
+                        }
                         _ => {}
                     }
                     return LRESULT(0);
+                }
+                WM_HOTKEY if wparam.0 as i32 == GLOBAL_HOTKEY_ID => {
+                    state.toggle_flyout();
+                    return LRESULT(0);
+                }
+                WM_WTSSESSION_CHANGE => {
+                    if let Some(event) = session_change_event(message, wparam.0) {
+                        state.handle_session_change(event);
+                    }
+                    return LRESULT(0);
+                }
+                WM_POWERBROADCAST => {
+                    if let Some(event) = power_broadcast_event(message, wparam.0) {
+                        state.handle_power_change(event);
+                    }
+                    return LRESULT(1);
                 }
                 WM_SETTINGCHANGE | WM_DISPLAYCHANGE => {
                     state.theme = ui::detect_theme(&state.settings.theme);
@@ -436,6 +540,8 @@ unsafe extern "system" fn main_window_proc(
                     return LRESULT(0);
                 }
                 WM_DESTROY => {
+                    state.hotkey.take();
+                    state.session_notifications.take();
                     PostQuitMessage(0);
                     return LRESULT(0);
                 }
@@ -457,7 +563,32 @@ unsafe extern "system" fn flyout_window_proc(
         match message {
             WM_PAINT if !state_ptr.is_null() => {
                 let state = &*state_ptr;
-                ui::paint_card(hwnd, &state.display, state.locale, state.theme);
+                ui::paint_card(
+                    hwnd,
+                    &state.display,
+                    state.locale,
+                    state.theme,
+                    ui::CardDecorations {
+                        pinned: state.settings.flyout_pinned,
+                        service_health: if state.settings.service_status_checks {
+                            service_health(state.service_status.status)
+                        } else {
+                            ui::ServiceHealth::Unknown
+                        },
+                    },
+                );
+                return LRESULT(0);
+            }
+            WM_LBUTTONUP if !state_ptr.is_null() => {
+                let state = &mut *state_ptr;
+                let x = (lparam.0 as u32 & 0xffff) as u16 as i16 as i32;
+                let y = ((lparam.0 as u32 >> 16) & 0xffff) as u16 as i16 as i32;
+                let dpi = GetDpiForWindow(hwnd).max(96);
+                if ui::pin_hit_test(x, y, dpi) {
+                    state.settings.flyout_pinned = !state.settings.flyout_pinned;
+                    state.persist_settings();
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
                 return LRESULT(0);
             }
             WM_ERASEBKGND => return LRESULT(1),
@@ -508,6 +639,101 @@ unsafe extern "system" fn flyout_window_proc(
 }
 
 impl AppState {
+    fn reset_status_timer(&self, delay_ms: u32) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_STATUS);
+            if self.settings.service_status_checks && !self.refresh_paused {
+                let _ = SetTimer(Some(self.hwnd), TIMER_STATUS, delay_ms.max(1_000), None);
+            }
+        }
+    }
+
+    fn start_status_check(&mut self) {
+        if self.status_checking || !self.settings.service_status_checks || self.refresh_paused {
+            return;
+        }
+        self.status_checking = true;
+        let hwnd_value = self.hwnd.0 as isize;
+        let spawn_result = thread::Builder::new()
+            .name("codex-status-service".to_owned())
+            .stack_size(384 * 1024)
+            .spawn(move || {
+                let hwnd = HWND(hwnd_value as *mut std::ffi::c_void);
+                let outcome = StatusOutcome {
+                    result: fetch_service_status().map_err(|error| error.to_string()),
+                };
+                let raw = Box::into_raw(Box::new(outcome));
+                if unsafe {
+                    PostMessageW(Some(hwnd), WM_STATUS_COMPLETE, WPARAM(0), LPARAM(raw as isize))
+                }
+                .is_err()
+                {
+                    unsafe {
+                        drop(Box::from_raw(raw));
+                    }
+                }
+            });
+        if spawn_result.is_err() {
+            self.status_checking = false;
+            self.reset_status_timer(STATUS_RETRY_MS);
+        }
+    }
+
+    fn finish_status_check(&mut self, outcome: StatusOutcome) {
+        self.status_checking = false;
+        if !self.settings.service_status_checks {
+            self.service_status = ServiceStatusSnapshot::unavailable();
+            let _ = self.update_tray(false);
+            unsafe {
+                let _ = InvalidateRect(Some(self.flyout), None, false);
+            }
+            return;
+        }
+        let delay = match outcome.result {
+            Ok(snapshot) => {
+                self.service_status = snapshot;
+                STATUS_INTERVAL_MS
+            }
+            Err(_) => {
+                self.service_status = ServiceStatusSnapshot::unavailable();
+                STATUS_RETRY_MS
+            }
+        };
+        self.reset_status_timer(delay);
+        let _ = self.update_tray(false);
+        unsafe {
+            let _ = InvalidateRect(Some(self.flyout), None, false);
+        }
+        self.schedule_working_set_trim();
+    }
+
+    fn handle_session_change(&mut self, event: SessionChangeEvent) {
+        self.set_refresh_paused(matches!(event, SessionChangeEvent::Locked));
+    }
+
+    fn handle_power_change(&mut self, event: PowerBroadcastEvent) {
+        self.set_refresh_paused(matches!(event, PowerBroadcastEvent::Suspend));
+    }
+
+    fn set_refresh_paused(&mut self, paused: bool) {
+        if self.refresh_paused == paused {
+            return;
+        }
+        self.refresh_paused = paused;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
+            let _ = KillTimer(Some(self.hwnd), TIMER_STATUS);
+        }
+        if !paused {
+            self.refresh_pending = false;
+            self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
+            self.start_refresh(false);
+            if self.settings.service_status_checks {
+                self.reset_status_timer(5_000);
+            }
+        }
+    }
+
     fn schedule_update_check(&self, fallback_delay_ms: u32) {
         let now = Utc::now().timestamp();
         let delay = self
@@ -614,6 +840,10 @@ impl AppState {
 
     fn start_refresh(&mut self, force: bool) {
         diagnostic("refresh:start");
+        if self.refresh_paused {
+            self.refresh_pending |= force;
+            return;
+        }
         if self.refreshing {
             self.refresh_pending |= force;
             return;
@@ -668,7 +898,7 @@ impl AppState {
                 let _ = self.store.save_snapshot(&snapshot);
                 self.display = DisplayState::live(snapshot);
                 self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
-                self.maybe_alert();
+                self.maybe_alerts();
             }
             Err(error) => {
                 self.failures = self.failures.saturating_add(1);
@@ -709,7 +939,9 @@ impl AppState {
     fn reset_refresh_timer(&self, milliseconds: u32) {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
-            let _ = SetTimer(Some(self.hwnd), TIMER_REFRESH, milliseconds.max(1_000), None);
+            if !self.refresh_paused {
+                let _ = SetTimer(Some(self.hwnd), TIMER_REFRESH, milliseconds.max(1_000), None);
+            }
         }
     }
 
@@ -717,9 +949,21 @@ impl AppState {
         diagnostic("tray:render");
         let dpi = unsafe { GetDpiForSystem().max(96) };
         let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi).max(16) as u32 };
-        let icon = create_icon(
-            self.display.weekly_percent(),
-            tone_for(&self.display),
+        let percent = ui::tray_percent(&self.display, &self.settings.tray_metric);
+        let service_overlay =
+            if self.settings.service_status_checks && self.service_status.codex_affected {
+                match self.service_status.status {
+                    ServiceStatus::Degraded => ServiceOverlay::Degraded,
+                    ServiceStatus::Outage => ServiceOverlay::Outage,
+                    _ => ServiceOverlay::None,
+                }
+            } else {
+                ServiceOverlay::None
+            };
+        let icon = create_icon_with_overlay(
+            percent,
+            tone_for_percent(&self.display, percent),
+            service_overlay,
             size,
             self.theme.high_contrast,
             self.theme.tray_dark,
@@ -728,7 +972,12 @@ impl AppState {
         data.uFlags = NIF_GUID | NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
         data.uCallbackMessage = WM_TRAY;
         data.hIcon = icon.handle();
-        copy_utf16(&mut data.szTip, &ui::tooltip(&self.display, self.locale));
+        let mut tooltip =
+            ui::tooltip_for_metric(&self.display, self.locale, &self.settings.tray_metric);
+        if self.service_status.codex_affected {
+            tooltip.push_str(self.locale.text(" · Codex service incident", " · Codex 服务异常"));
+        }
+        copy_utf16(&mut data.szTip, &tooltip);
         let add = force_add || !self.tray_added;
         let operation = if add { NIM_ADD } else { NIM_MODIFY };
         diagnostic(if add { "tray:add" } else { "tray:modify" });
@@ -783,33 +1032,95 @@ impl AppState {
         }
     }
 
-    fn maybe_alert(&mut self) {
-        let Some(threshold) = self.settings.alert_threshold else {
+    fn maybe_alerts(&mut self) {
+        let Some(snapshot) = self.display.snapshot.clone() else {
             return;
         };
-        let Some(snapshot) = self.display.snapshot.as_ref() else {
-            return;
-        };
-        let Some(weekly) = snapshot.weekly.as_ref() else {
-            return;
-        };
-        if weekly.display_percent() > threshold {
-            return;
+        let now = Utc::now().timestamp();
+        let mut attention = Vec::new();
+        let mut recovered = Vec::new();
+        let mut settings_changed = false;
+
+        for (kind, window, threshold) in [
+            (QuotaKind::Weekly, snapshot.weekly.as_ref(), self.settings.alert_threshold),
+            (QuotaKind::Session, snapshot.session.as_ref(), self.settings.session_alert_threshold),
+        ] {
+            let decision = evaluate_alerts(self.alert_tracker, kind, window, threshold, now);
+            self.alert_tracker = decision.tracker;
+            let label = quota_kind_label(kind, self.locale);
+
+            if decision.should_notify_low {
+                if let Some(window) = window {
+                    attention.push(format!(
+                        "{label}: {}% {}",
+                        window.display_percent(),
+                        self.locale.text("remaining", "剩余")
+                    ));
+                    let reset = window.resets_at;
+                    match kind {
+                        QuotaKind::Weekly => self.settings.last_alert_reset = reset,
+                        QuotaKind::Session => self.settings.last_session_alert_reset = reset,
+                    }
+                    settings_changed = true;
+                }
+            }
+            if self.settings.recovery_alerts && decision.should_notify_recovered {
+                recovered.push(format!(
+                    "{label} {}",
+                    self.locale.text("is available again", "已恢复可用")
+                ));
+            }
+
+            if self.settings.pace_alerts {
+                if let Some(window) = window {
+                    let insight = analyze_window(window, now);
+                    let last_reset = match kind {
+                        QuotaKind::Weekly => self.settings.last_weekly_pace_alert_reset,
+                        QuotaKind::Session => self.settings.last_session_pace_alert_reset,
+                    };
+                    if insight.is_ahead_of_pace
+                        && insight.likely_exhaust_before_reset
+                        && window.resets_at != last_reset
+                    {
+                        let projected = insight
+                            .projected_exhaustion_at
+                            .map(|timestamp| format_local_time(timestamp, self.locale))
+                            .unwrap_or_else(|| {
+                                self.locale.text("before reset", "重置前").to_owned()
+                            });
+                        attention.push(format!(
+                            "{label}: {} {projected}",
+                            self.locale.text("may run out by", "预计耗尽于")
+                        ));
+                        match kind {
+                            QuotaKind::Weekly => {
+                                self.settings.last_weekly_pace_alert_reset = window.resets_at
+                            }
+                            QuotaKind::Session => {
+                                self.settings.last_session_pace_alert_reset = window.resets_at
+                            }
+                        }
+                        settings_changed = true;
+                    }
+                }
+            }
         }
-        let reset = weekly.resets_at.unwrap_or(0);
-        if self.settings.last_alert_reset == Some(reset) {
-            return;
+
+        if !attention.is_empty() {
+            self.show_balloon(
+                self.locale.text("Codex quota needs attention", "Codex 额度需要留意"),
+                &attention.join("\n"),
+            );
         }
-        self.show_balloon(
-            self.locale.text("Codex quota is running low", "Codex 周额度偏低"),
-            &format!(
-                "{} {}%",
-                self.locale.text("Weekly remaining:", "本周剩余："),
-                weekly.display_percent()
-            ),
-        );
-        self.settings.last_alert_reset = Some(reset);
-        let _ = self.store.save_settings(&self.settings);
+        if !recovered.is_empty() {
+            self.show_balloon(
+                self.locale.text("Codex quota recovered", "Codex 额度已恢复"),
+                &recovered.join("\n"),
+            );
+        }
+        if settings_changed {
+            self.persist_settings();
+        }
     }
 
     fn request_toggle_flyout(&mut self) {
@@ -860,6 +1171,10 @@ impl AppState {
     }
 
     fn handle_flyout_inactive(&mut self) {
+        if self.settings.flyout_pinned {
+            self.flyout_ignore_inactive_until = None;
+            return;
+        }
         let guarded =
             self.flyout_ignore_inactive_until.is_some_and(|deadline| Instant::now() < deadline);
         if guarded {
@@ -978,40 +1293,168 @@ impl AppState {
                 false,
             )?;
             separator(menu)?;
+
+            let interval_menu = CreatePopupMenu()?;
             append(
-                menu,
+                interval_menu,
                 CMD_INTERVAL_1,
-                self.locale.text("Refresh every 1 minute", "每 1 分钟刷新"),
+                self.locale.text("Every 1 minute", "每 1 分钟"),
                 self.settings.refresh_minutes == 1,
             )?;
             append(
-                menu,
+                interval_menu,
                 CMD_INTERVAL_5,
-                self.locale.text("Refresh every 5 minutes", "每 5 分钟刷新"),
+                self.locale.text("Every 5 minutes", "每 5 分钟"),
                 self.settings.refresh_minutes == 5,
             )?;
             append(
-                menu,
+                interval_menu,
                 CMD_INTERVAL_15,
-                self.locale.text("Refresh every 15 minutes", "每 15 分钟刷新"),
+                self.locale.text("Every 15 minutes", "每 15 分钟"),
                 self.settings.refresh_minutes == 15,
             )?;
-            separator(menu)?;
+            append_submenu(menu, interval_menu, self.locale.text("Refresh interval", "刷新间隔"))?;
+
+            let tray_menu = CreatePopupMenu()?;
             append(
-                menu,
+                tray_menu,
+                CMD_TRAY_WEEKLY,
+                self.locale.text("Weekly quota", "周额度"),
+                self.settings.tray_metric == "weekly",
+            )?;
+            append(
+                tray_menu,
+                CMD_TRAY_SESSION,
+                self.locale.text("5-hour quota", "5 小时额度"),
+                self.settings.tray_metric == "session",
+            )?;
+            append(
+                tray_menu,
+                CMD_TRAY_LOWEST,
+                self.locale.text("Lower of both", "显示较低值"),
+                self.settings.tray_metric == "lowest",
+            )?;
+            append_submenu(menu, tray_menu, self.locale.text("Tray display", "托盘显示"))?;
+
+            let alert_menu = CreatePopupMenu()?;
+            append_disabled(alert_menu, self.locale.text("Weekly quota", "周额度"))?;
+            append(
+                alert_menu,
                 CMD_ALERT_OFF,
-                self.locale.text("Low-quota alerts off", "关闭低额度提醒"),
+                self.locale.text("Off", "关闭"),
                 self.settings.alert_threshold.is_none(),
             )?;
             for (command, threshold) in [(CMD_ALERT_10, 10), (CMD_ALERT_20, 20), (CMD_ALERT_30, 30)]
             {
                 let label = match (self.locale, threshold) {
-                    (ui::Locale::Chinese, value) => format!("剩余低于 {value}% 时提醒"),
-                    (_, value) => format!("Alert below {value}%"),
+                    (ui::Locale::Chinese, value) => format!("剩余不高于 {value}% 时提醒"),
+                    (_, value) => format!("Alert at or below {value}%"),
                 };
-                append(menu, command, &label, self.settings.alert_threshold == Some(threshold))?;
+                append(
+                    alert_menu,
+                    command,
+                    &label,
+                    self.settings.alert_threshold == Some(threshold),
+                )?;
             }
+            separator(alert_menu)?;
+            append_disabled(alert_menu, self.locale.text("5-hour quota", "5 小时额度"))?;
+            append(
+                alert_menu,
+                CMD_SESSION_ALERT_OFF,
+                self.locale.text("Off", "关闭"),
+                self.settings.session_alert_threshold.is_none(),
+            )?;
+            for (command, threshold) in
+                [(CMD_SESSION_ALERT_10, 10), (CMD_SESSION_ALERT_20, 20), (CMD_SESSION_ALERT_30, 30)]
+            {
+                let label = match (self.locale, threshold) {
+                    (ui::Locale::Chinese, value) => format!("剩余不高于 {value}% 时提醒"),
+                    (_, value) => format!("Alert at or below {value}%"),
+                };
+                append(
+                    alert_menu,
+                    command,
+                    &label,
+                    self.settings.session_alert_threshold == Some(threshold),
+                )?;
+            }
+            separator(alert_menu)?;
+            append(
+                alert_menu,
+                CMD_PACE_ALERTS,
+                self.locale.text("Smart pace alerts", "智能用量节奏提醒"),
+                self.settings.pace_alerts,
+            )?;
+            append(
+                alert_menu,
+                CMD_RECOVERY_ALERTS,
+                self.locale.text("Recovery alerts", "额度恢复提醒"),
+                self.settings.recovery_alerts,
+            )?;
+            append(
+                alert_menu,
+                CMD_TEST_NOTIFICATION,
+                self.locale.text("Test notification", "测试通知"),
+                false,
+            )?;
+            append_submenu(menu, alert_menu, self.locale.text("Alerts", "提醒"))?;
+
+            let appearance_menu = CreatePopupMenu()?;
+            append(
+                appearance_menu,
+                CMD_THEME_SYSTEM,
+                self.locale.text("Follow system", "跟随系统"),
+                self.settings.theme == "system",
+            )?;
+            append(
+                appearance_menu,
+                CMD_THEME_LIGHT,
+                self.locale.text("Light", "浅色"),
+                self.settings.theme == "light",
+            )?;
+            append(
+                appearance_menu,
+                CMD_THEME_DARK,
+                self.locale.text("Dark", "深色"),
+                self.settings.theme == "dark",
+            )?;
+            separator(appearance_menu)?;
+            append(
+                appearance_menu,
+                CMD_PIN_FLYOUT,
+                self.locale.text("Keep details open", "保持详情卡片常开"),
+                self.settings.flyout_pinned,
+            )?;
+            append_submenu(menu, appearance_menu, self.locale.text("Appearance", "外观"))?;
+
             separator(menu)?;
+            append(
+                menu,
+                CMD_COPY_STATUS,
+                self.locale.text("Copy quota status", "复制额度状态"),
+                false,
+            )?;
+            append(
+                menu,
+                CMD_COPY_DIAGNOSTICS,
+                self.locale.text("Copy diagnostics", "复制诊断信息"),
+                false,
+            )?;
+            separator(menu)?;
+            append(menu, CMD_STATUS_PAGE, &self.service_status_label(), false)?;
+            append(
+                menu,
+                CMD_STATUS_CHECKS,
+                self.locale.text("Check OpenAI service status", "检查 OpenAI 服务状态"),
+                self.settings.service_status_checks,
+            )?;
+            append(
+                menu,
+                CMD_GLOBAL_HOTKEY,
+                self.locale.text("Global shortcut: Ctrl+Alt+Q", "全局快捷键：Ctrl+Alt+Q"),
+                self.settings.global_hotkey,
+            )?;
             append(
                 menu,
                 CMD_STARTUP,
@@ -1019,25 +1462,6 @@ impl AppState {
                 startup_enabled,
             )?;
             append(menu, CMD_RELEASES, self.locale.text("Open releases", "查看新版本"), false)?;
-            separator(menu)?;
-            append(
-                menu,
-                CMD_THEME_SYSTEM,
-                self.locale.text("Theme: system", "主题：跟随系统"),
-                self.settings.theme == "system",
-            )?;
-            append(
-                menu,
-                CMD_THEME_LIGHT,
-                self.locale.text("Theme: light", "主题：浅色"),
-                self.settings.theme == "light",
-            )?;
-            append(
-                menu,
-                CMD_THEME_DARK,
-                self.locale.text("Theme: dark", "主题：深色"),
-                self.settings.theme == "dark",
-            )?;
             separator(menu)?;
             append(
                 menu,
@@ -1055,6 +1479,9 @@ impl AppState {
                 0 => {}
                 CMD_REFRESH => self.start_refresh(true),
                 CMD_USAGE => self.open_url(USAGE_URL),
+                CMD_COPY_STATUS => self.copy_to_clipboard(&self.status_text()),
+                CMD_COPY_DIAGNOSTICS => self.copy_to_clipboard(&self.diagnostics_text()),
+                CMD_STATUS_PAGE => self.open_url(STATUS_PAGE_HOME),
                 CMD_RELEASES => self.open_url(RELEASES_URL),
                 CMD_INTERVAL_1 | CMD_INTERVAL_5 | CMD_INTERVAL_15 => {
                     self.settings.refresh_minutes = match command {
@@ -1073,8 +1500,70 @@ impl AppState {
                         _ => None,
                     };
                     self.settings.last_alert_reset = None;
+                    self.alert_tracker.weekly.low_alerted_cycle = None;
                     self.persist_settings();
-                    self.maybe_alert();
+                    self.maybe_alerts();
+                }
+                CMD_SESSION_ALERT_OFF
+                | CMD_SESSION_ALERT_10
+                | CMD_SESSION_ALERT_20
+                | CMD_SESSION_ALERT_30 => {
+                    self.settings.session_alert_threshold = match command {
+                        CMD_SESSION_ALERT_10 => Some(10),
+                        CMD_SESSION_ALERT_20 => Some(20),
+                        CMD_SESSION_ALERT_30 => Some(30),
+                        _ => None,
+                    };
+                    self.settings.last_session_alert_reset = None;
+                    self.alert_tracker.session.low_alerted_cycle = None;
+                    self.persist_settings();
+                    self.maybe_alerts();
+                }
+                CMD_PACE_ALERTS => {
+                    self.settings.pace_alerts = !self.settings.pace_alerts;
+                    self.settings.last_weekly_pace_alert_reset = None;
+                    self.settings.last_session_pace_alert_reset = None;
+                    self.persist_settings();
+                    self.maybe_alerts();
+                }
+                CMD_RECOVERY_ALERTS => {
+                    self.settings.recovery_alerts = !self.settings.recovery_alerts;
+                    self.persist_settings();
+                }
+                CMD_TEST_NOTIFICATION => self.show_balloon(
+                    self.locale.text("CodexStatus notification", "CodexStatus 通知"),
+                    self.locale.text(
+                        "Notifications are working. No quota setting was changed.",
+                        "通知工作正常，未修改任何额度设置。",
+                    ),
+                ),
+                CMD_TRAY_WEEKLY | CMD_TRAY_SESSION | CMD_TRAY_LOWEST => {
+                    self.settings.tray_metric = match command {
+                        CMD_TRAY_SESSION => "session",
+                        CMD_TRAY_LOWEST => "lowest",
+                        _ => "weekly",
+                    }
+                    .to_owned();
+                    self.persist_settings();
+                    let _ = self.update_tray(false);
+                }
+                CMD_STATUS_CHECKS => {
+                    self.settings.service_status_checks = !self.settings.service_status_checks;
+                    self.persist_settings();
+                    if self.settings.service_status_checks {
+                        self.reset_status_timer(1_000);
+                    } else {
+                        let _ = KillTimer(Some(self.hwnd), TIMER_STATUS);
+                        self.service_status = ServiceStatusSnapshot::unavailable();
+                        let _ = self.update_tray(false);
+                        let _ = InvalidateRect(Some(self.flyout), None, false);
+                    }
+                }
+                CMD_GLOBAL_HOTKEY => self.toggle_global_hotkey(),
+                CMD_PIN_FLYOUT => {
+                    self.settings.flyout_pinned = !self.settings.flyout_pinned;
+                    self.persist_settings();
+                    let _ = InvalidateRect(Some(self.flyout), None, false);
                 }
                 CMD_STARTUP => {
                     let result = if startup::is_enabled() {
@@ -1114,6 +1603,122 @@ impl AppState {
         let _ = self.store.save_settings(&self.settings);
     }
 
+    fn toggle_global_hotkey(&mut self) {
+        if self.hotkey.is_some() {
+            self.hotkey.take();
+            self.settings.global_hotkey = false;
+            self.persist_settings();
+            return;
+        }
+
+        match HotKeyRegistration::register(
+            Some(self.hwnd),
+            GLOBAL_HOTKEY_ID,
+            MOD_ALT | MOD_CONTROL | MOD_NOREPEAT,
+            u32::from(b'Q'),
+        ) {
+            Ok(registration) => {
+                self.hotkey = Some(registration);
+                self.settings.global_hotkey = true;
+                self.persist_settings();
+            }
+            Err(_) => self.show_balloon(
+                self.locale.text("Shortcut unavailable", "快捷键不可用"),
+                self.locale.text(
+                    "Ctrl+Alt+Q is already used by another app.",
+                    "Ctrl+Alt+Q 已被其他应用占用。",
+                ),
+            ),
+        }
+    }
+
+    fn copy_to_clipboard(&self, text: &str) {
+        match write_unicode_text(self.hwnd, text) {
+            Ok(()) => self.show_balloon(
+                self.locale.text("Copied", "已复制"),
+                self.locale.text("Copied to the clipboard.", "内容已复制到剪贴板。"),
+            ),
+            Err(_) => self.show_balloon(
+                self.locale.text("Could not copy", "复制失败"),
+                self.locale
+                    .text("The clipboard is busy. Please try again.", "剪贴板正忙，请稍后重试。"),
+            ),
+        }
+    }
+
+    fn status_text(&self) -> String {
+        let mut lines = vec!["CodexStatus".to_owned()];
+        if let Some(snapshot) = self.display.snapshot.as_ref() {
+            lines.push(quota_status_line(QuotaKind::Weekly, snapshot.weekly.as_ref(), self.locale));
+            if snapshot.session.is_some() {
+                lines.push(quota_status_line(
+                    QuotaKind::Session,
+                    snapshot.session.as_ref(),
+                    self.locale,
+                ));
+            }
+            if let Some(plan) = snapshot.account.plan_type.as_deref() {
+                lines.push(format!(
+                    "{}: {}",
+                    self.locale.text("Plan", "套餐"),
+                    ui::plan_label(plan)
+                ));
+            }
+            lines.push(format!(
+                "{}: {}",
+                self.locale.text("Updated", "更新时间"),
+                format_local_time(snapshot.fetched_at, self.locale)
+            ));
+        } else {
+            lines.push(self.locale.text("Quota unavailable", "额度暂不可用").to_owned());
+        }
+        lines.push(self.service_status_label());
+        lines.join("\r\n")
+    }
+
+    fn diagnostics_text(&self) -> String {
+        let snapshot = self.display.snapshot.as_ref();
+        let weekly = snapshot.and_then(|value| value.weekly.as_ref());
+        let session = snapshot.and_then(|value| value.session.as_ref());
+        let error = self
+            .display
+            .error
+            .as_deref()
+            .map(|value| value.replace(['\r', '\n'], " "))
+            .unwrap_or_else(|| "none".to_owned());
+        format!(
+            "CodexStatus diagnostics\r\nversion={}\r\nrefresh_state={:?}\r\nweekly={}\r\nsession={}\r\nlast_update={}\r\nrefresh_minutes={}\r\ntray_metric={}\r\ntheme={}\r\nservice_status={:?}\r\ncodex_affected={}\r\nservice_summary={}\r\nlast_error={}",
+            env!("CARGO_PKG_VERSION"),
+            self.display.refresh_state,
+            diagnostic_window(weekly),
+            diagnostic_window(session),
+            snapshot.map(|value| value.fetched_at.to_string()).unwrap_or_else(|| "none".to_owned()),
+            self.settings.refresh_minutes,
+            self.settings.tray_metric,
+            self.settings.theme,
+            self.service_status.status,
+            self.service_status.codex_affected,
+            self.service_status.summary.replace(['\r', '\n'], " "),
+            error,
+        )
+    }
+
+    fn service_status_label(&self) -> String {
+        if !self.settings.service_status_checks {
+            return self
+                .locale
+                .text("OpenAI status: checks off", "OpenAI 状态：检查已关闭")
+                .to_owned();
+        }
+        let status = match self.service_status.status {
+            ServiceStatus::Operational => self.locale.text("Operational", "正常"),
+            ServiceStatus::Degraded => self.locale.text("Degraded", "服务降级"),
+            ServiceStatus::Outage => self.locale.text("Outage", "服务中断"),
+            ServiceStatus::Unknown => self.locale.text("Unavailable", "暂不可用"),
+        };
+        format!("{}: {status}", self.locale.text("OpenAI status", "OpenAI 状态"))
+    }
+
     fn open_url(&self, url: &str) {
         let url = wide0(url);
         let result = unsafe {
@@ -1145,6 +1750,7 @@ impl Drop for AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = KillTimer(Some(self.hwnd), TIMER_UPDATE);
             let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
+            let _ = KillTimer(Some(self.hwnd), TIMER_STATUS);
             if self.tray_added {
                 let data = self.notify_data();
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
@@ -1163,6 +1769,20 @@ unsafe fn append(
         let text = wide0(label);
         let flags = if checked { MF_STRING | MF_CHECKED } else { MF_STRING };
         AppendMenuW(menu, flags, command as usize, PCWSTR(text.as_ptr()))
+    }
+}
+
+unsafe fn append_submenu(menu: HMENU, submenu: HMENU, label: &str) -> windows::core::Result<()> {
+    unsafe {
+        let text = wide0(label);
+        AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR(text.as_ptr()))
+    }
+}
+
+unsafe fn append_disabled(menu: HMENU, label: &str) -> windows::core::Result<()> {
+    unsafe {
+        let text = wide0(label);
+        AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, PCWSTR(text.as_ptr()))
     }
 }
 
@@ -1189,6 +1809,94 @@ fn copy_utf16<const N: usize>(target: &mut [u16; N], value: &str) {
 
 fn wide0(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn seed_alert_tracker(settings: &Settings, state: &DisplayState, now: i64) -> AlertTracker {
+    let mut tracker = AlertTracker::default();
+    let Some(snapshot) = state.snapshot.as_ref() else {
+        return tracker;
+    };
+    for (kind, window, last_alert_reset) in [
+        (QuotaKind::Weekly, snapshot.weekly.as_ref(), settings.last_alert_reset),
+        (QuotaKind::Session, snapshot.session.as_ref(), settings.last_session_alert_reset),
+    ] {
+        let Some(window) = window else {
+            continue;
+        };
+        let Some(cycle) = current_cycle(window, now) else {
+            continue;
+        };
+        let mut alert_state = tracker.for_kind(kind);
+        alert_state.observed_cycle = Some(cycle);
+        alert_state.depleted = window.display_percent() == 0;
+        if last_alert_reset == Some(cycle.resets_at) {
+            alert_state.low_alerted_cycle = Some(cycle);
+        }
+        tracker = tracker.with_kind(kind, alert_state);
+    }
+    tracker
+}
+
+fn quota_kind_label(kind: QuotaKind, locale: ui::Locale) -> &'static str {
+    match kind {
+        QuotaKind::Weekly => locale.text("Weekly quota", "周额度"),
+        QuotaKind::Session => locale.text("5-hour quota", "5 小时额度"),
+    }
+}
+
+fn quota_status_line(kind: QuotaKind, window: Option<&QuotaWindow>, locale: ui::Locale) -> String {
+    let label = quota_kind_label(kind, locale);
+    let Some(window) = window else {
+        return format!("{label}: --");
+    };
+    let reset = window
+        .resets_at
+        .map(|value| format_local_time(value, locale))
+        .unwrap_or_else(|| "--".to_owned());
+    format!(
+        "{label}: {}% {} · {} {reset}",
+        window.display_percent(),
+        locale.text("remaining", "剩余"),
+        locale.text("resets", "重置")
+    )
+}
+
+fn format_local_time(timestamp: i64, locale: ui::Locale) -> String {
+    DateTime::<Utc>::from_timestamp(timestamp, 0)
+        .map(|time| {
+            let local = time.with_timezone(&Local);
+            match locale {
+                ui::Locale::Chinese => local.format("%m/%d %H:%M").to_string(),
+                ui::Locale::English => local.format("%Y-%m-%d %H:%M").to_string(),
+            }
+        })
+        .unwrap_or_else(|| "--".to_owned())
+}
+
+fn diagnostic_window(window: Option<&QuotaWindow>) -> String {
+    window.map_or_else(
+        || "none".to_owned(),
+        |window| {
+            format!(
+                "remaining={}%,window_minutes={},resets_at={}",
+                window.display_percent(),
+                window.window_minutes,
+                window
+                    .resets_at
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_owned())
+            )
+        },
+    )
+}
+
+fn service_health(status: ServiceStatus) -> ui::ServiceHealth {
+    match status {
+        ServiceStatus::Operational => ui::ServiceHealth::Operational,
+        ServiceStatus::Degraded => ui::ServiceHealth::Degraded,
+        ServiceStatus::Outage => ui::ServiceHealth::Outage,
+        ServiceStatus::Unknown => ui::ServiceHealth::Unknown,
+    }
 }
 
 fn friendly_error(error: &str, locale: ui::Locale) -> String {
@@ -1225,6 +1933,7 @@ fn diagnostic(_stage: &str) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{AccountSummary, WEEK_MINUTES};
 
     #[test]
     fn rejects_unknown_options() {
@@ -1239,5 +1948,43 @@ mod tests {
         let mut target = [9_u16; 4];
         copy_utf16(&mut target, "abcdef");
         assert_eq!(target[3], 0);
+    }
+
+    #[test]
+    fn persisted_cycle_prevents_a_duplicate_weekly_alert_after_restart() {
+        let now = 1_000_000;
+        let reset = now + 60;
+        let display = DisplayState::loading(Some(QuotaSnapshot {
+            weekly: Some(QuotaWindow {
+                used_percent: 92.0,
+                remaining_percent: 8.0,
+                window_minutes: WEEK_MINUTES,
+                resets_at: Some(reset),
+            }),
+            session: None,
+            account: AccountSummary::default(),
+            fetched_at: now,
+        }));
+        let settings = Settings {
+            alert_threshold: Some(10),
+            last_alert_reset: Some(reset),
+            ..Settings::default()
+        };
+        let tracker = seed_alert_tracker(&settings, &display, now);
+        let decision = evaluate_alerts(
+            tracker,
+            QuotaKind::Weekly,
+            display.snapshot.as_ref().and_then(|value| value.weekly.as_ref()),
+            settings.alert_threshold,
+            now,
+        );
+        assert!(!decision.should_notify_low);
+    }
+
+    #[test]
+    fn copied_status_omits_an_unavailable_optional_window() {
+        let line = quota_status_line(QuotaKind::Session, None, ui::Locale::Chinese);
+        assert_eq!(line, "5 小时额度: --");
+        assert_eq!(format_local_time(i64::MAX, ui::Locale::English), "--");
     }
 }

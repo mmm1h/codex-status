@@ -4,11 +4,14 @@
 mod app;
 mod app_server;
 mod icon;
+mod insights;
 mod model;
 mod settings;
 mod startup;
+mod status_page;
 mod ui;
 mod updater;
+mod windows_helpers;
 
 fn main() {
     #[cfg(feature = "diagnostics")]

@@ -12,7 +12,7 @@
 |:--:|:--:|
 | ![CodexStatus light quota flyout](assets/screenshots/codexstatus-light.png) | ![CodexStatus dark quota flyout](assets/screenshots/codexstatus-dark.png) |
 
-CodexStatus is a tiny native Windows utility. Its notification-area icon is the number itself—`0` to `100`, or `--` when no trustworthy weekly value is available. Click it for reset timing, the optional five-hour window, plan information, and refresh status.
+CodexStatus is a tiny native Windows utility. Its notification-area icon is the number itself—`0` to `100`, or `--` when no trustworthy value is available. Click it for reset timing, usage pace, the optional five-hour window, plan information, and refresh status.
 
 ## Highlights
 
@@ -24,6 +24,10 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 - Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
 - Event-driven Win32 process with no Electron, WebView, WPF, WinUI, local HTTP server, or resident async runtime.
 - Five-minute default refresh, manual refresh, bounded failure backoff, safe cache expiry, and optional low-quota alerts.
+- Weekly and five-hour alert thresholds, projected-exhaustion warnings, recovery alerts, and a built-in notification test.
+- Weekly, five-hour, or lowest-of-both tray display; the details card hides unavailable windows instead of inventing values.
+- Optional official OpenAI status checks, copyable status/diagnostics, a pinnable card, and a `Ctrl+Alt+Q` shortcut.
+- Quota and service checks pause while Windows is locked or asleep and resume with one fresh read.
 - Single instance, Explorer-restart recovery, multi-monitor placement, and optional start with Windows.
 - English and Simplified Chinese UI, selected from Windows automatically.
 
@@ -40,32 +44,33 @@ The installer is not yet code-signed, so Microsoft Defender SmartScreen may show
 ## Use
 
 - **Left-click:** open or close the quota card.
-- **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, open Releases, or exit.
-- **Tray label:** weekly remaining percentage rounded to the nearest whole number.
+- **Right-click:** refresh, choose the tray metric, configure weekly/five-hour/pace/recovery alerts, select a theme, pin the card, copy status or diagnostics, check OpenAI status, toggle `Ctrl+Alt+Q`, manage startup, or exit.
+- **Tray label:** weekly remaining by default; optionally the five-hour value or the lower of both, rounded to the nearest whole number.
+- **Quota bar marker:** compares quota remaining with time remaining in the current weekly cycle and flags a pace that projects exhaustion before reset.
 
 CodexStatus only calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read`, then closes the process tree using a Windows Job Object. It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota.
 
 ## Privacy
 
-CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. For automatic updates, it reads the public latest-release metadata from `api.github.com` at most once per day and downloads an executable only when a newer stable version exists. The file must match the SHA-256 digest published by GitHub before it can replace the current executable.
+CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. Service checks read only the public `status.openai.com` summary, send no credentials, run at most every 15 minutes, and can be disabled from the tray menu. For automatic updates, it reads the public latest-release metadata from `api.github.com` at most once per day and downloads an executable only when a newer stable version exists. The file must match the SHA-256 digest published by GitHub before it can replace the current executable.
 
 Two files are stored under `%LOCALAPPDATA%\CodexStatus`:
 
-- `settings.json`: refresh interval, UI language, theme, alert threshold, onboarding state, last successful update check, and alert deduplication state.
+- `settings.json`: refresh interval, UI language, theme, tray metric, notification choices, shortcut/pin choices, onboarding state, last successful update check, and alert deduplication state.
 - `snapshot.json`: the latest non-sensitive parsed quota snapshot. It is discarded once its reset time passes.
 
 Normal builds do not write logs. The optional `diagnostics` Cargo feature records only lifecycle stages and filtered error summaries.
 
 ## Performance
 
-Measured on Windows 11 24H2 x64 with the v0.2.3 release:
+Measured on Windows 11 24H2 x64 with a 121-second v0.3.0 Release residency sample:
 
 | State | CodexStatus working set | CPU | Child processes |
 |---|---:|---:|---:|
-| Idle after refresh | ~12 MB | ≤0.1% average | 0 |
+| Idle after refresh and service check | 6.26 MB average / 6.32 MB maximum | ≤0.1% average | 0 |
 | Refreshing | <15 MB for the tray process | brief | 1 temporary `codex app-server` tree |
 
-The app-server process has a larger transient footprint because it is Codex itself; it exits immediately after the two account calls complete and is not part of the resident tray process.
+The sample ended with fewer handles than it started and no change in GDI or USER object counts. The app-server process has a larger transient footprint because it is Codex itself; it exits immediately after the two account calls complete and is not part of the resident tray process.
 
 ## Build
 

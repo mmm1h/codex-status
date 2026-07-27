@@ -2,6 +2,17 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.3.0] - 2026-07-27
+
+- Add independent weekly and five-hour low-quota thresholds, smart pace warnings, recovery alerts, and a test-notification action.
+- Add selectable tray values for weekly quota, five-hour quota, or the lower of both; unavailable five-hour data is now omitted from the card.
+- Show a time-progress marker and usage-pace interpretation beside the weekly quota bar.
+- Add on-demand OpenAI service-status checks with a compact Codex incident badge and a direct link to the official status page.
+- Add copyable quota summaries and privacy-safe diagnostics, an optional `Ctrl+Alt+Q` global shortcut, and a pinnable details card.
+- Pause quota and service-status timers while Windows is locked or asleep, then refresh once after resume.
+- Reorganize the tray menu into compact Refresh, Tray display, Alerts, and Appearance groups.
+- Extend cached settings without storing credentials, account identity, raw responses, or usage history.
+
 ## [0.2.3] - 2026-07-27
 
 - Generate the Windows manifest and executable version metadata from the Cargo package version so File Explorer reports the installed release correctly.

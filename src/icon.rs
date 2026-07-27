@@ -22,6 +22,13 @@ pub enum IconTone {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceOverlay {
+    None,
+    Degraded,
+    Outage,
+}
+
 impl IconTone {
     fn accent(self, high_contrast: bool, dark_taskbar: bool) -> [u8; 4] {
         if high_contrast {
@@ -41,15 +48,11 @@ impl IconTone {
     }
 }
 
-pub fn tone_for(state: &DisplayState) -> IconTone {
+pub fn tone_for_percent(state: &DisplayState, percent: Option<u8>) -> IconTone {
     if state.refresh_state != RefreshState::Live {
-        return if state.weekly_percent().is_some() {
-            IconTone::Stale
-        } else {
-            IconTone::Unavailable
-        };
+        return if percent.is_some() { IconTone::Stale } else { IconTone::Unavailable };
     }
-    match state.weekly_percent() {
+    match percent {
         Some(percent) if percent < 20 => IconTone::Critical,
         Some(percent) if percent < 50 => IconTone::Warning,
         Some(_) => IconTone::Healthy,
@@ -73,15 +76,16 @@ impl Drop for OwnedIcon {
     }
 }
 
-pub fn create_icon(
+pub fn create_icon_with_overlay(
     percent: Option<u8>,
     tone: IconTone,
+    overlay: ServiceOverlay,
     size: u32,
     high_contrast: bool,
     dark_taskbar: bool,
 ) -> windows::core::Result<OwnedIcon> {
     let size = size.clamp(16, 32);
-    let xor = render_bgra(percent, tone, size, high_contrast, dark_taskbar);
+    let xor = render_bgra_with_overlay(percent, tone, overlay, size, high_contrast, dark_taskbar);
     let mask_stride = size.div_ceil(32) * 4;
     let and_mask = vec![0_u8; (mask_stride * size) as usize];
     let icon = unsafe {
@@ -98,15 +102,16 @@ pub fn create_icon(
     Ok(OwnedIcon(icon))
 }
 
-pub fn render_bgra(
+pub fn render_bgra_with_overlay(
     percent: Option<u8>,
     tone: IconTone,
+    overlay: ServiceOverlay,
     size: u32,
     high_contrast: bool,
     dark_taskbar: bool,
 ) -> Vec<u8> {
     let size = size.clamp(16, 32);
-    let pixels = render_rgba(percent, tone, size, high_contrast, dark_taskbar);
+    let pixels = render_rgba(percent, tone, overlay, size, high_contrast, dark_taskbar);
     let mut bytes = Vec::with_capacity((size * size * 4) as usize);
 
     // CreateIcon's 32-bpp XOR input is consumed in the same top-left order as
@@ -124,6 +129,7 @@ pub fn render_bgra(
 fn render_rgba(
     percent: Option<u8>,
     tone: IconTone,
+    overlay: ServiceOverlay,
     size: u32,
     high_contrast: bool,
     dark_taskbar: bool,
@@ -142,7 +148,36 @@ fn render_rgba(
     for x in 1..size.saturating_sub(1) {
         set_pixel(&mut pixels, size, x as i32, size as i32 - 1, accent);
     }
+    draw_service_overlay(&mut pixels, size, overlay, high_contrast, dark_taskbar);
     pixels
+}
+
+fn draw_service_overlay(
+    pixels: &mut [[u8; 4]],
+    size: u32,
+    overlay: ServiceOverlay,
+    high_contrast: bool,
+    dark_taskbar: bool,
+) {
+    if overlay == ServiceOverlay::None {
+        return;
+    }
+    let scale = (size / 16).max(1) as i32;
+    let color = if high_contrast {
+        foreground(dark_taskbar, false)
+    } else if overlay == ServiceOverlay::Outage {
+        [224, 49, 65, 255]
+    } else {
+        [214, 137, 16, 255]
+    };
+    let right = size as i32 - 1;
+    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        for sy in 0..scale {
+            for sx in 0..scale {
+                set_pixel(pixels, size, right - (dx + 1) * scale + sx, dy * scale + sy, color);
+            }
+        }
+    }
 }
 
 fn foreground(dark_taskbar: bool, muted: bool) -> [u8; 4] {
@@ -402,7 +437,14 @@ mod tests {
                 for value in
                     [None, Some(0), Some(9), Some(20), Some(49), Some(50), Some(87), Some(100)]
                 {
-                    let pixels = render_bgra(value, IconTone::Healthy, size, false, dark);
+                    let pixels = render_bgra_with_overlay(
+                        value,
+                        IconTone::Healthy,
+                        ServiceOverlay::None,
+                        size,
+                        false,
+                        dark,
+                    );
                     assert_eq!(pixels.len(), (size * size * 4) as usize);
                     assert!(pixels.iter().any(|byte| *byte != 0));
                 }
@@ -412,7 +454,8 @@ mod tests {
 
     #[test]
     fn common_two_digit_value_is_readable_but_keeps_a_transparent_background() {
-        let pixels = render_rgba(Some(87), IconTone::Healthy, 16, false, false);
+        let pixels =
+            render_rgba(Some(87), IconTone::Healthy, ServiceOverlay::None, 16, false, false);
         let visible: Vec<_> =
             pixels.iter().enumerate().filter(|(_, pixel)| pixel[3] > 20).collect();
         let left = visible.iter().map(|(index, _)| index % 16).min().unwrap();
@@ -423,8 +466,9 @@ mod tests {
 
     #[test]
     fn light_and_dark_taskbars_get_opposite_foreground_colors() {
-        let light = render_rgba(Some(87), IconTone::Healthy, 16, false, false);
-        let dark = render_rgba(Some(87), IconTone::Healthy, 16, false, true);
+        let light =
+            render_rgba(Some(87), IconTone::Healthy, ServiceOverlay::None, 16, false, false);
+        let dark = render_rgba(Some(87), IconTone::Healthy, ServiceOverlay::None, 16, false, true);
         let sample = light
             .iter()
             .zip(&dark)
@@ -435,7 +479,8 @@ mod tests {
 
     #[test]
     fn status_color_is_a_single_bottom_rule() {
-        let pixels = render_rgba(Some(50), IconTone::Healthy, 16, false, false);
+        let pixels =
+            render_rgba(Some(50), IconTone::Healthy, ServiceOverlay::None, 16, false, false);
         let accent = IconTone::Healthy.accent(false, false);
         assert_eq!(pixels[15 * 16], [0, 0, 0, 0]);
         assert!(pixels[15 * 16 + 1..15 * 16 + 15].iter().all(|pixel| *pixel == accent));
@@ -444,12 +489,34 @@ mod tests {
 
     #[test]
     fn create_icon_bytes_keep_the_status_rule_on_the_bottom() {
-        let pixels = render_bgra(Some(50), IconTone::Healthy, 16, false, false);
+        let pixels = render_bgra_with_overlay(
+            Some(50),
+            IconTone::Healthy,
+            ServiceOverlay::None,
+            16,
+            false,
+            false,
+        );
         let accent = IconTone::Healthy.accent(false, false);
         let accent_bgra = [accent[2], accent[1], accent[0], accent[3]];
         let pixel = |x: usize, y: usize| &pixels[(y * 16 + x) * 4..][..4];
         assert_ne!(pixel(8, 0), accent_bgra);
         assert_eq!(pixel(8, 15), accent_bgra);
+    }
+
+    #[test]
+    fn service_overlay_uses_a_small_top_right_badge_without_moving_the_quota_rule() {
+        let plain =
+            render_rgba(Some(87), IconTone::Healthy, ServiceOverlay::None, 16, false, false);
+        let outage =
+            render_rgba(Some(87), IconTone::Healthy, ServiceOverlay::Outage, 16, false, false);
+        for y in 0..2 {
+            for x in 13..15 {
+                assert_eq!(outage[y * 16 + x], [224, 49, 65, 255]);
+                assert_ne!(outage[y * 16 + x], plain[y * 16 + x]);
+            }
+        }
+        assert_eq!(&plain[15 * 16..16 * 16], &outage[15 * 16..16 * 16]);
     }
 
     #[test]
@@ -472,9 +539,14 @@ mod tests {
                 error: None,
             }
         }
-        assert_eq!(tone_for(&state(19)), IconTone::Critical);
-        assert_eq!(tone_for(&state(20)), IconTone::Warning);
-        assert_eq!(tone_for(&state(49)), IconTone::Warning);
-        assert_eq!(tone_for(&state(50)), IconTone::Healthy);
+        for (percent, expected) in [
+            (19, IconTone::Critical),
+            (20, IconTone::Warning),
+            (49, IconTone::Warning),
+            (50, IconTone::Healthy),
+        ] {
+            let display = state(percent);
+            assert_eq!(tone_for_percent(&display, display.weekly_percent()), expected);
+        }
     }
 }
