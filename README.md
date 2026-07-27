@@ -18,7 +18,7 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 
 - Weekly remaining quota drawn directly into the standard tray icon.
 - Transparent, theme-aware Segoe UI digits with a restrained green (≥50%), amber (20–49%), red (<20%), or muted status rule.
-- Native rounded flyout that follows light, dark, high-contrast, and per-monitor DPI settings.
+- Direct2D + DirectWrite rounded flyout with ClearType typography, restrained data visualization, and light, dark, high-contrast, and per-monitor DPI support.
 - System, light, and dark flyout themes selectable from the tray menu.
 - Silent daily updates from verified GitHub Release assets, followed by an automatic restart.
 - Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
@@ -63,14 +63,14 @@ Normal builds do not write logs. The optional `diagnostics` Cargo feature record
 
 ## Performance
 
-Measured on Windows 11 24H2 x64 with a 121-second v0.3.0 Release residency sample:
+Measured on Windows 11 24H2 x64 with a 120.77-second local v0.4.0 x64 Release residency sample after closing the flyout:
 
 | State | CodexStatus working set | CPU | Child processes |
 |---|---:|---:|---:|
-| Idle after refresh and service check | 6.26 MB average / 6.32 MB maximum | ≤0.1% average | 0 |
+| Idle after the flyout closes | 3.56 MB average / 3.86 MB maximum | 0.0% observed | 0 |
 | Refreshing | <15 MB for the tray process | brief | 1 temporary `codex app-server` tree |
 
-The sample ended with fewer handles than it started and no change in GDI or USER object counts. The app-server process has a larger transient footprint because it is Codex itself; it exits immediately after the two account calls complete and is not part of the resident tray process.
+The sample ended with two threads, fewer handles than it started, no change in GDI or USER object counts, and no child process. Direct2D and DirectWrite are loaded only while the card is visible; their objects are released when it closes and the working set is trimmed shortly afterward. The app-server process has a larger transient footprint because it is Codex itself; it exits immediately after the two account calls complete and is not part of the resident tray process. If Direct2D initialization ever fails, the previous GDI renderer remains available as a fallback.
 
 ## Build
 

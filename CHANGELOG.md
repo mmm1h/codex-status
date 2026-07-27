@@ -2,6 +2,15 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.4.0] - 2026-07-27
+
+- Move the details flyout to a lazy Direct2D + DirectWrite renderer with ClearType text, DPI-aware geometry, and the existing GDI path retained as a safe fallback.
+- Introduce one restrained native design system for light and dark themes: a focused quota surface, clearer type hierarchy, semantic status colors, and an open metrics grid without stacked mini-cards.
+- Add a compact quota trace that combines remaining quota, the current endpoint, the expected time-position marker, and a plain-language pace interpretation.
+- Prefer Segoe UI Variable Text through DirectWrite with automatic Segoe UI fallback, keeping Latin, numerals, and localized text in one coherent Windows font family.
+- Release graphics resources when the flyout closes and schedule an immediate working-set trim, preserving the low idle footprint despite the higher-fidelity renderer.
+- Refresh the documented light and dark screenshots and performance sample for the new interface.
+
 ## [0.3.0] - 2026-07-27
 
 - Add independent weekly and five-hour low-quota thresholds, smart pace warnings, recovery alerts, and a test-notification action.

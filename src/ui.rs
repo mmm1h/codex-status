@@ -26,6 +26,8 @@ use windows::core::{PCWSTR, w};
 use winreg::RegKey;
 use winreg::enums::HKEY_CURRENT_USER;
 
+mod direct2d;
+
 pub const CARD_WIDTH: i32 = 376;
 pub const CARD_HEIGHT: i32 = 296;
 
@@ -140,24 +142,24 @@ pub fn detect_theme(preference: &str) -> Theme {
             dark,
             tray_dark,
             high_contrast: false,
-            background: rgb(32, 32, 32),
-            surface: rgb(43, 43, 43),
-            surface_alt: rgb(48, 48, 48),
-            text: rgb(245, 245, 245),
-            muted: rgb(190, 190, 190),
-            line: rgb(61, 61, 61),
+            background: rgb(23, 25, 27),
+            surface: rgb(31, 35, 37),
+            surface_alt: rgb(36, 40, 42),
+            text: rgb(244, 247, 245),
+            muted: rgb(170, 179, 175),
+            line: rgb(54, 60, 61),
         }
     } else {
         Theme {
             dark,
             tray_dark,
             high_contrast: false,
-            background: rgb(243, 243, 243),
+            background: rgb(244, 246, 247),
             surface: rgb(255, 255, 255),
-            surface_alt: rgb(248, 248, 248),
-            text: rgb(24, 24, 24),
-            muted: rgb(94, 94, 94),
-            line: rgb(226, 226, 226),
+            surface_alt: rgb(239, 243, 244),
+            text: rgb(17, 24, 32),
+            muted: rgb(86, 98, 108),
+            line: rgb(216, 224, 228),
         }
     }
 }
@@ -244,24 +246,38 @@ pub fn paint_card(
         let height = (client.bottom - client.top).max(1);
         let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96);
 
-        let buffer = CreateCompatibleDC(Some(hdc));
-        let bitmap = CreateCompatibleBitmap(hdc, width, height);
-        if !buffer.is_invalid() && !bitmap.is_invalid() {
-            let old_bitmap = SelectObject(buffer, HGDIOBJ(bitmap.0));
-            draw_card(buffer, state, locale, theme, decorations, dpi);
-            let _ = BitBlt(hdc, 0, 0, width, height, Some(buffer), 0, 0, SRCCOPY);
-            let _ = SelectObject(buffer, old_bitmap);
-        } else {
-            draw_card(hdc, state, locale, theme, decorations, dpi);
-        }
-        if !bitmap.is_invalid() {
-            let _ = DeleteObject(HGDIOBJ(bitmap.0));
-        }
-        if !buffer.is_invalid() {
-            let _ = DeleteDC(buffer);
+        if !direct2d::paint(direct2d::PaintInput {
+            hwnd,
+            size: (width, height),
+            dpi,
+            state,
+            locale,
+            theme,
+            decorations,
+        }) {
+            let buffer = CreateCompatibleDC(Some(hdc));
+            let bitmap = CreateCompatibleBitmap(hdc, width, height);
+            if !buffer.is_invalid() && !bitmap.is_invalid() {
+                let old_bitmap = SelectObject(buffer, HGDIOBJ(bitmap.0));
+                draw_card(buffer, state, locale, theme, decorations, dpi);
+                let _ = BitBlt(hdc, 0, 0, width, height, Some(buffer), 0, 0, SRCCOPY);
+                let _ = SelectObject(buffer, old_bitmap);
+            } else {
+                draw_card(hdc, state, locale, theme, decorations, dpi);
+            }
+            if !bitmap.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            }
+            if !buffer.is_invalid() {
+                let _ = DeleteDC(buffer);
+            }
         }
         let _ = EndPaint(hwnd, &paint);
     }
+}
+
+pub fn release_card_resources() {
+    direct2d::release();
 }
 
 unsafe fn draw_card(

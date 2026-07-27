@@ -1167,6 +1167,8 @@ impl AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
             let _ = ShowWindow(self.flyout, SW_HIDE);
         }
+        ui::release_card_resources();
+        self.schedule_working_set_trim();
         self.try_apply_update();
     }
 
