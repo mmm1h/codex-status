@@ -2,7 +2,7 @@
 
 All notable changes to CodexStatus are documented here.
 
-## Unreleased
+## [0.7.0] - 2026-07-28
 
 - Give stable, portable, beta, and development builds independent window, mutex, settings, startup, and tray identities. Portable tray icons use `HWND` plus `uID`, so moving the executable no longer changes its identity.
 - Prefer Codex Desktop's per-user app-server executables ahead of inaccessible WindowsApps candidates while preserving `CODEX_STATUS_CODEX` as the explicit override and retaining npm/PATH fallbacks.
