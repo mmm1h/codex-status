@@ -1,7 +1,26 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
+    println!("cargo:rerun-if-env-changed=CODEX_STATUS_CHANNEL");
+    configure_release_channel();
     compile_resource();
+}
+
+fn configure_release_channel() {
+    let channel =
+        std::env::var("CODEX_STATUS_CHANNEL").unwrap_or_else(|_| "development".to_owned());
+    let channel = channel.trim().to_ascii_lowercase();
+    match channel.as_str() {
+        "development" | "beta" | "portable" | "stable" => {}
+        value => panic!(
+            "unsupported CODEX_STATUS_CHANNEL={value:?}; expected development, beta, portable, or stable"
+        ),
+    }
+    println!(
+        "cargo:rustc-check-cfg=cfg(codex_status_channel, values(\"development\", \"beta\", \"portable\", \"stable\"))"
+    );
+    println!("cargo:rustc-cfg=codex_status_channel=\"{channel}\"");
+    println!("cargo:rustc-env=CODEX_STATUS_CHANNEL={channel}");
 }
 
 #[cfg(not(target_env = "msvc"))]

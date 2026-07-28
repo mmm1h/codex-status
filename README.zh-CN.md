@@ -41,7 +41,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 2. 运行安装程序。默认安装到 `%LOCALAPPDATA%\Programs\CodexStatus`，并默认启用开机启动。
 3. 如果 Windows 把新图标放进折叠区，请打开折叠区，把 CodexStatus 拖到可见托盘。图标是否常显由 Windows 和用户控制，应用无法强制固定。
 
-当前安装包尚未代码签名，因此 Microsoft Defender SmartScreen 可能提示“无法识别的应用”。每个 Release 都提供 SHA-256 校验文件。便携 ZIP 默认不会修改开机启动，可从右键菜单自行开启。
+当前安装包尚未代码签名，因此 Microsoft Defender SmartScreen 可能提示“无法识别的应用”。每个 Release 都提供 SHA-256 校验文件。便携 ZIP 和独立的 `-portable.exe` 使用不绑定路径的托盘身份，默认不会修改开机启动，可从右键菜单自行开启。
 
 ## 使用
 
@@ -60,9 +60,9 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 
 ## 隐私
 
-CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词和 app-server 原始响应，也不收集遥测。服务检查只读取 `status.openai.com` 的公开摘要，不发送任何凭据，最多每 15 分钟一次，并可从托盘菜单关闭。自动更新最多每天读取一次 `api.github.com` 的公开最新 Release 元数据；只有存在更高的稳定版本时才下载程序，并且必须通过 GitHub 发布的 SHA-256 摘要校验后才会替换当前程序。
+CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词和 app-server 原始响应，也不收集遥测。服务检查只读取 `status.openai.com` 的公开摘要，不发送任何凭据，最多每 15 分钟一次，并可从托盘菜单关闭。stable 与 portable 构建最多每天读取一次 `api.github.com` 的公开最新 Release 元数据，并只下载各自精确匹配的 channel 资产；beta 与 development 构建不执行自更新。下载程序必须通过 GitHub 发布的 SHA-256 摘要校验后才会替换当前程序。
 
-`%LOCALAPPDATA%\CodexStatus` 下只有两个文件：
+各 channel 的状态分别保存在 `%LOCALAPPDATA%\CodexStatus`（stable）、`CodexStatusPortable`、`CodexStatusBeta` 或 `CodexStatusDevelopment`。portable 构建首次运行时会从旧版共用的 `CodexStatus` 目录复制既有状态，但不会覆盖已经存在的 portable 状态。每个目录包含：
 
 - `settings.json`：刷新间隔、界面语言、主题、托盘指标、提醒/快捷键/固定选项、首次引导、最近一次成功更新检查和提醒去重状态。
 - `snapshot.json`：最近一次经过解析的非敏感额度快照；一旦跨过重置时间立即失效。
@@ -93,7 +93,9 @@ cargo test --all-targets
 cargo build --release --locked
 ```
 
-GitHub Actions 会为版本标签构建便携 ZIP 和 Inno Setup 安装包。本地也可使用 gnullvm 开发工具链；此时 llvm-mingw 的 `libunwind.dll` 只是本地开发依赖，正式 MSVC Release 是单文件程序。
+未设置 `CODEX_STATUS_CHANNEL` 时会有意生成 `development` 构建，其窗口、mutex、设置、启动项和托盘身份均与正式版隔离。需要等同安装版的本地构建时设置 `CODEX_STATUS_CHANNEL=stable`，便携构建设置为 `portable`；也支持 `beta`。stable 与 portable 只使用各自匹配的更新资产，beta 与 development 不自更新。因此，未显式设置环境变量的 `cargo install` 也会生成 development-channel 程序。
+
+GitHub Actions 会为版本标签构建独立便携程序、便携 ZIP 和 Inno Setup 安装包。本地也可使用 gnullvm 开发工具链；此时 llvm-mingw 的 `libunwind.dll` 只是本地开发依赖，正式 MSVC Release 是单文件程序。
 
 ## 首版边界
 

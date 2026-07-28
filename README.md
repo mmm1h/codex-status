@@ -41,7 +41,7 @@ CodexStatus requires Windows 10/11 x64 and an already installed, signed-in [Code
 2. Run it. The default location is `%LOCALAPPDATA%\Programs\CodexStatus` and start-with-Windows is enabled by default.
 3. If Windows places the new icon behind the overflow arrow, open that area and drag CodexStatus onto the visible tray. Windows—not applications—controls notification icon visibility.
 
-The installer is not yet code-signed, so Microsoft Defender SmartScreen may show an “unrecognized app” warning. Release assets include SHA-256 checksums. The portable ZIP makes no startup changes; enable startup from the right-click menu if desired.
+The installer is not yet code-signed, so Microsoft Defender SmartScreen may show an “unrecognized app” warning. Release assets include SHA-256 checksums. The portable ZIP and standalone `-portable.exe` use a path-independent tray identity and make no startup changes; enable startup from the right-click menu if desired.
 
 ## Use
 
@@ -60,9 +60,9 @@ High-contrast mode, disabled Windows transparency effects, a Remote Desktop sess
 
 ## Privacy
 
-CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. Service checks read only the public `status.openai.com` summary, send no credentials, run at most every 15 minutes, and can be disabled from the tray menu. For automatic updates, it reads the public latest-release metadata from `api.github.com` at most once per day and downloads an executable only when a newer stable version exists. The file must match the SHA-256 digest published by GitHub before it can replace the current executable.
+CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. Service checks read only the public `status.openai.com` summary, send no credentials, run at most every 15 minutes, and can be disabled from the tray menu. Stable and portable builds read the public latest-release metadata from `api.github.com` at most once per day and download only their exact channel asset when a newer stable version exists; beta and development builds do not self-update. The file must match the SHA-256 digest published by GitHub before it can replace the current executable.
 
-Two files are stored under `%LOCALAPPDATA%\CodexStatus`:
+State is isolated by build channel under `%LOCALAPPDATA%`: `CodexStatus` (stable), `CodexStatusPortable`, `CodexStatusBeta`, or `CodexStatusDevelopment`. A portable build copies existing pre-channel portable state from `CodexStatus` once, without overwriting state already created in `CodexStatusPortable`. Each directory contains:
 
 - `settings.json`: refresh interval, UI language, theme, tray metric, notification choices, shortcut/pin choices, onboarding state, last successful update check, and alert deduplication state.
 - `snapshot.json`: the latest non-sensitive parsed quota snapshot. It is discarded once its reset time passes.
@@ -93,7 +93,9 @@ cargo test --all-targets
 cargo build --release --locked
 ```
 
-GitHub Actions builds the portable ZIP and Inno Setup installer for version tags. Local development can also use the gnullvm target; llvm-mingw's `libunwind.dll` is then a development-only runtime dependency. Official release builds use MSVC and are a single executable.
+An unset `CODEX_STATUS_CHANNEL` intentionally produces a `development` build with separate window, mutex, settings, startup, and tray identities. Use `CODEX_STATUS_CHANNEL=stable` for an installed release-equivalent build or `CODEX_STATUS_CHANNEL=portable` for the portable identity; `beta` is also accepted. Stable and portable builds must use the matching release asset, while beta and development builds do not self-update. This also means `cargo install` produces a development-channel binary unless the environment variable is set explicitly.
+
+GitHub Actions builds the standalone portable executable, portable ZIP, and Inno Setup installer for version tags. Local development can also use the gnullvm target; llvm-mingw's `libunwind.dll` is then a development-only runtime dependency. Official release builds use MSVC and are a single executable.
 
 ## Design boundaries
 

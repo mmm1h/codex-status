@@ -44,11 +44,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
     TrackMouseEvent, VK_ESCAPE,
 };
+#[cfg(not(codex_status_channel = "portable"))]
+use windows::Win32::UI::Shell::NIF_GUID;
 use windows::Win32::UI::Shell::{
-    NIF_GUID, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
-    NIIF_RESPECT_QUIET_TIME, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_BALLOONSHOW,
-    NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER,
-    Shell_NotifyIconGetRect, Shell_NotifyIconW, ShellExecuteW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME,
+    NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_BALLOONSHOW, NIN_SELECT,
+    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect,
+    Shell_NotifyIconW, ShellExecuteW,
 };
 #[cfg(feature = "diagnostics")]
 use windows::Win32::UI::Shell::{NIN_BALLOONHIDE, NIN_BALLOONTIMEOUT, NIN_BALLOONUSERCLICK};
@@ -72,16 +74,36 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMenuItemCount, GetMenuItemID, GetMenuItemInfoW, GetMenuState, GetSubMenu, MENUITEMINFOW,
     MFT_RADIOCHECK, MIIM_FTYPE,
 };
-use windows::core::{GUID, PCWSTR, w};
+#[cfg(not(codex_status_channel = "portable"))]
+use windows::core::GUID;
+use windows::core::{PCWSTR, w};
 
+#[cfg(codex_status_channel = "stable")]
 const MAIN_CLASS: PCWSTR = w!("CodexStatus.MainWindow.v1");
+#[cfg(codex_status_channel = "stable")]
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.FlyoutWindow.v1");
-#[cfg(not(feature = "diagnostics"))]
-const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D");
-#[cfg(feature = "diagnostics")]
-const MUTEX_NAME: PCWSTR =
-    w!("Local\\CodexStatus.Diagnostics.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D");
+#[cfg(codex_status_channel = "stable")]
 const TRAY_GUID: GUID = GUID::from_u128(0x7a89d848_0611_4cb4_98c9_88ca9b59ff84);
+
+#[cfg(codex_status_channel = "beta")]
+const MAIN_CLASS: PCWSTR = w!("CodexStatus.Beta.MainWindow.v1");
+#[cfg(codex_status_channel = "beta")]
+const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Beta.FlyoutWindow.v1");
+#[cfg(codex_status_channel = "beta")]
+const TRAY_GUID: GUID = GUID::from_u128(0xcf8c5592_542f_47d2_a7b2_fa3ee023d0b3);
+
+#[cfg(codex_status_channel = "development")]
+const MAIN_CLASS: PCWSTR = w!("CodexStatus.Development.MainWindow.v1");
+#[cfg(codex_status_channel = "development")]
+const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Development.FlyoutWindow.v1");
+#[cfg(codex_status_channel = "development")]
+const TRAY_GUID: GUID = GUID::from_u128(0xc4f400e1_9a66_410c_8cd4_babd3aab77b1);
+
+#[cfg(codex_status_channel = "portable")]
+const MAIN_CLASS: PCWSTR = w!("CodexStatus.Portable.MainWindow.v1");
+#[cfg(codex_status_channel = "portable")]
+const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Portable.FlyoutWindow.v1");
+
 const TRAY_ID: u32 = 1;
 
 const WM_TRAY: u32 = WM_APP + 1;
@@ -328,7 +350,8 @@ pub fn run() -> Result<(), AppError> {
     unsafe {
         SetLastError(WIN32_ERROR(0));
     }
-    let mutex = unsafe { InstanceHandle(CreateMutexW(None, false, MUTEX_NAME)?) };
+    let mutex_name = wide0(mutex_name_text());
+    let mutex = unsafe { InstanceHandle(CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr()))?) };
     let mutex_was_existing = unsafe { GetLastError() == ERROR_ALREADY_EXISTS };
     diagnostic("run:mutex");
     if mutex_was_existing {
@@ -338,6 +361,9 @@ pub fn run() -> Result<(), AppError> {
             }
         }
         return Ok(());
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        let _ = startup::migrate_legacy(&executable);
     }
 
     let instance = unsafe { HINSTANCE(GetModuleHandleW(None)?.0) };
@@ -1054,6 +1080,9 @@ impl AppState {
     }
 
     fn schedule_update_check(&self, fallback_delay_ms: u32) {
+        if !updater::updates_supported() {
+            return;
+        }
         let now = Utc::now().timestamp();
         let delay = automatic_update_delay(self.settings.last_update_check, now, fallback_delay_ms);
         self.reset_update_timer(delay);
@@ -1068,6 +1097,18 @@ impl AppState {
 
     fn start_update_check(&mut self, kind: UpdateCheckKind) {
         if self.update_checking || self.pending_update.is_some() {
+            return;
+        }
+        if !updater::updates_supported() {
+            if kind == UpdateCheckKind::Manual {
+                self.show_balloon(
+                    self.locale.text("Updates unavailable", "此构建不提供更新"),
+                    self.locale.text(
+                        "Development and beta builds do not install release-channel updates.",
+                        "development 与 beta 构建不会安装发布 channel 的更新。",
+                    ),
+                );
+            }
             return;
         }
         if kind.bypasses_daily_throttle() {
@@ -1440,7 +1481,7 @@ impl AppState {
             self.theme.tray_dark,
         )?;
         let mut data = self.notify_data();
-        data.uFlags = NIF_GUID | NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+        data.uFlags |= NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
         data.uCallbackMessage = WM_TRAY;
         data.hIcon = icon.handle();
         let mut tooltip =
@@ -1492,13 +1533,25 @@ impl AppState {
     }
 
     fn notify_data(&self) -> NOTIFYICONDATAW {
-        NOTIFYICONDATAW {
-            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: self.hwnd,
-            uID: TRAY_ID,
-            guidItem: TRAY_GUID,
-            uFlags: NIF_GUID,
-            ..Default::default()
+        #[cfg(codex_status_channel = "portable")]
+        {
+            NOTIFYICONDATAW {
+                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: self.hwnd,
+                uID: TRAY_ID,
+                ..Default::default()
+            }
+        }
+        #[cfg(not(codex_status_channel = "portable"))]
+        {
+            NOTIFYICONDATAW {
+                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: self.hwnd,
+                uID: TRAY_ID,
+                guidItem: TRAY_GUID,
+                uFlags: NIF_GUID,
+                ..Default::default()
+            }
         }
     }
 
@@ -1523,7 +1576,7 @@ impl AppState {
             return false;
         }
         let mut data = self.notify_data();
-        data.uFlags = NIF_GUID | NIF_INFO;
+        data.uFlags |= NIF_INFO;
         data.dwInfoFlags =
             if respect_quiet_time { NIIF_INFO | NIIF_RESPECT_QUIET_TIME } else { NIIF_INFO };
         copy_utf16(&mut data.szInfoTitle, title);
@@ -1894,6 +1947,14 @@ impl AppState {
     }
 
     fn tray_rect(&self) -> Option<RECT> {
+        #[cfg(codex_status_channel = "portable")]
+        let identifier = NOTIFYICONIDENTIFIER {
+            cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+            hWnd: self.hwnd,
+            uID: TRAY_ID,
+            ..Default::default()
+        };
+        #[cfg(not(codex_status_channel = "portable"))]
         let identifier = NOTIFYICONIDENTIFIER {
             cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
             hWnd: self.hwnd,
@@ -2145,7 +2206,13 @@ impl AppState {
                 startup_enabled,
             )?;
             append(menu, CMD_RELEASES, self.locale.text("Open releases", "打开发布页"), false)?;
-            if self.update_checking || self.pending_update.is_some() {
+            if !updater::updates_supported() {
+                append_command_disabled(
+                    menu,
+                    CMD_CHECK_UPDATES,
+                    self.locale.text("Updates unavailable in this build", "此构建不提供自动更新"),
+                )?;
+            } else if self.update_checking || self.pending_update.is_some() {
                 append_command_disabled(
                     menu,
                     CMD_CHECK_UPDATES,
@@ -2799,6 +2866,32 @@ fn copy_utf16<const N: usize>(target: &mut [u16; N], value: &str) {
     }
 }
 
+fn mutex_name_text() -> &'static str {
+    mutex_name_for(env!("CODEX_STATUS_CHANNEL"), cfg!(feature = "diagnostics"))
+}
+
+fn mutex_name_for(channel: &str, diagnostics: bool) -> &'static str {
+    match (channel, diagnostics) {
+        ("stable", false) => "Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D",
+        ("stable", true) => "Local\\CodexStatus.Diagnostics.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D",
+        ("beta", false) => "Local\\CodexStatus.Beta.CF8C5592-542F-47D2-A7B2-FA3EE023D0B3",
+        ("beta", true) => {
+            "Local\\CodexStatus.Beta.Diagnostics.CF8C5592-542F-47D2-A7B2-FA3EE023D0B3"
+        }
+        ("development", false) => {
+            "Local\\CodexStatus.Development.C4F400E1-9A66-410C-8CD4-BABD3AAB77B1"
+        }
+        ("development", true) => {
+            "Local\\CodexStatus.Development.Diagnostics.C4F400E1-9A66-410C-8CD4-BABD3AAB77B1"
+        }
+        ("portable", false) => "Local\\CodexStatus.Portable.780AC163-DB94-4E7C-8976-712402FBA7A3",
+        ("portable", true) => {
+            "Local\\CodexStatus.Portable.Diagnostics.780AC163-DB94-4E7C-8976-712402FBA7A3"
+        }
+        _ => unreachable!("build.rs validates CODEX_STATUS_CHANNEL"),
+    }
+}
+
 fn wide0(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -2944,6 +3037,31 @@ mod tests {
         let mut target = [9_u16; 4];
         copy_utf16(&mut target, "abcdef");
         assert_eq!(target[3], 0);
+    }
+
+    #[test]
+    fn mutex_names_isolate_every_channel_and_diagnostics_build() {
+        let mut names = std::collections::HashSet::new();
+        for channel in ["stable", "beta", "development", "portable"] {
+            let normal = mutex_name_for(channel, false);
+            let diagnostics = mutex_name_for(channel, true);
+            assert_ne!(normal, diagnostics);
+            assert!(names.insert(normal));
+            assert!(names.insert(diagnostics));
+        }
+        assert_eq!(names.len(), 8);
+        assert_eq!(
+            mutex_name_for("stable", false),
+            "Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D"
+        );
+        assert_eq!(
+            mutex_name_for("stable", true),
+            "Local\\CodexStatus.Diagnostics.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D"
+        );
+        assert_eq!(
+            mutex_name_text(),
+            mutex_name_for(env!("CODEX_STATUS_CHANNEL"), cfg!(feature = "diagnostics"))
+        );
     }
 
     #[test]
