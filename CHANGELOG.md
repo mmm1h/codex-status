@@ -2,6 +2,10 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.1] - 2026-07-28
+
+- Match the reset-credit status case-insensitively, so a credit would still be counted if the service ever reported `Available` rather than `available`.
+
 ## [0.6.0] - 2026-07-28
 
 - Save tray menu settings as a transaction: a failed write now rolls the setting back, skips the runtime side effect, and reports the failure, instead of leaving memory and disk disagreeing until the next restart.
