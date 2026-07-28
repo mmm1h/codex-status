@@ -165,7 +165,12 @@ fn earliest_available_credit_expiry(rate_result: &Value, now: i64) -> Option<i64
         .pointer("/rateLimitResetCredits/credits")
         .and_then(Value::as_array)?
         .iter()
-        .filter(|credit| credit.get("status").and_then(Value::as_str) == Some("available"))
+        .filter(|credit| {
+            credit
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status.eq_ignore_ascii_case("available"))
+        })
         .filter_map(|credit| credit.get("expiresAt").and_then(Value::as_i64))
         .filter(|expires_at| *expires_at > now)
         .min()
@@ -253,7 +258,7 @@ mod tests {
                 "availableCount": 3,
                 "credits": [
                     {"expiresAt": 500, "status": "available"},
-                    {"expiresAt": 300, "status": "available"},
+                    {"expiresAt": 300, "status": "AVAILABLE"},
                     {"expiresAt": 200, "status": "redeeming"},
                     {"expiresAt": 150, "status": "available"},
                     {"expiresAt": 250, "status": "redeemed"}
