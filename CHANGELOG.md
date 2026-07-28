@@ -2,7 +2,7 @@
 
 All notable changes to CodexStatus are documented here.
 
-## [Unreleased]
+## [0.6.0] - 2026-07-28
 
 - Save tray menu settings as a transaction: a failed write now rolls the setting back, skips the runtime side effect, and reports the failure, instead of leaving memory and disk disagreeing until the next restart.
 - Validate the startup registry entry against the current executable, so a stale or broken path is no longer reported as enabled and can be repaired by selecting the item again.
