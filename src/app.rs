@@ -84,7 +84,7 @@ const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.FlyoutWindow.v1");
 #[cfg(codex_status_channel = "stable")]
 const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D");
 #[cfg(codex_status_channel = "stable")]
-const TRAY_GUID: GUID = GUID::from_u128(0x22a261eb_26be_4fa8_854c_0447f2337d64);
+const TRAY_GUID: GUID = GUID::from_u128(0x7a89d848_0611_4cb4_98c9_88ca9b59ff84);
 
 #[cfg(codex_status_channel = "beta")]
 const MAIN_CLASS: PCWSTR = w!("CodexStatus.Beta.MainWindow.v1");

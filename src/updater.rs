@@ -280,10 +280,8 @@ enum UpdateAssetChannel {
 impl UpdateAssetChannel {
     fn asset_name(self, version: &str) -> String {
         match self {
-            Self::Installed => {
-                format!("CodexStatus-v{version}-windows-x64-installed.exe")
-            }
-            Self::Portable => format!("CodexStatus-v{version}-windows-x64.exe"),
+            Self::Installed => format!("CodexStatus-v{version}-windows-x64.exe"),
+            Self::Portable => format!("CodexStatus-v{version}-windows-x64-portable.exe"),
         }
     }
 }
@@ -516,12 +514,42 @@ mod tests {
     fn installed_and_portable_channels_select_different_assets() {
         assert_eq!(
             UpdateAssetChannel::Installed.asset_name("0.7.0"),
-            "CodexStatus-v0.7.0-windows-x64-installed.exe"
+            "CodexStatus-v0.7.0-windows-x64.exe"
         );
         assert_eq!(
             UpdateAssetChannel::Portable.asset_name("0.7.0"),
-            "CodexStatus-v0.7.0-windows-x64.exe"
+            "CodexStatus-v0.7.0-windows-x64-portable.exe"
         );
+    }
+
+    #[test]
+    fn v0_6_1_installed_client_selects_the_stable_asset_from_a_new_release() {
+        let digest = "a".repeat(64);
+        let release = serde_json::to_vec(&json!({
+            "tag_name": "v0.7.0",
+            "draft": false,
+            "prerelease": false,
+            "assets": [
+                {
+                    "name": "CodexStatus-v0.7.0-windows-x64-portable.exe",
+                    "browser_download_url": "https://github.com/mmm1h/codex-status/releases/download/v0.7.0/CodexStatus-v0.7.0-windows-x64-portable.exe",
+                    "size": 100_000,
+                    "digest": format!("sha256:{digest}")
+                },
+                {
+                    "name": "CodexStatus-v0.7.0-windows-x64.exe",
+                    "browser_download_url": "https://github.com/mmm1h/codex-status/releases/download/v0.7.0/CodexStatus-v0.7.0-windows-x64.exe",
+                    "size": 100_000,
+                    "digest": format!("sha256:{digest}")
+                }
+            ]
+        }))
+        .unwrap();
+
+        let (_, asset, _) =
+            select_asset(&release, "0.6.1", UpdateAssetChannel::Installed).unwrap().unwrap();
+
+        assert_eq!(asset.name, "CodexStatus-v0.7.0-windows-x64.exe");
     }
 
     #[test]
