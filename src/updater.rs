@@ -1,9 +1,10 @@
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, c_void};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::ptr;
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
@@ -14,7 +15,7 @@ use windows::Win32::Networking::WinHttp::{
     WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
 };
 use windows::Win32::Storage::FileSystem::{
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    FILE_FLAG_DELETE_ON_CLOSE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
@@ -41,6 +42,8 @@ pub enum UpdateError {
     DigestMismatch,
     #[error("Update helper did not receive a safe target")]
     UnsafeTarget,
+    #[error("The executable location does not allow in-place updates")]
+    TargetNotWritable,
     #[error("The running CodexStatus process did not exit in time")]
     ParentStillRunning,
 }
@@ -205,6 +208,12 @@ pub fn check_and_stage(updates_directory: &Path) -> Result<Option<StagedUpdate>,
     else {
         return Ok(None);
     };
+    let version_directory = updates_directory.join(format!("v{version}"));
+    fs::create_dir_all(&version_directory)?;
+    probe_directory_writable(&version_directory)?;
+    let executable = version_directory.join("CodexStatus.exe");
+    let temporary = version_directory.join("CodexStatus.download");
+
     let bytes = client.get(
         &asset.browser_download_url,
         "application/octet-stream",
@@ -217,10 +226,6 @@ pub fn check_and_stage(updates_directory: &Path) -> Result<Option<StagedUpdate>,
         return Err(UpdateError::DigestMismatch);
     }
 
-    let version_directory = updates_directory.join(format!("v{version}"));
-    fs::create_dir_all(&version_directory)?;
-    let executable = version_directory.join("CodexStatus.exe");
-    let temporary = version_directory.join("CodexStatus.download");
     fs::write(&temporary, bytes)?;
     if executable.exists() {
         fs::remove_file(&executable)?;
@@ -294,6 +299,28 @@ pub fn updates_supported() -> bool {
     update_asset_channel().is_some()
 }
 
+pub fn validate_target_for_update(target: &Path) -> Result<(), UpdateError> {
+    validate_target(target)?;
+    if fs::metadata(target)?.permissions().readonly() {
+        return Err(UpdateError::TargetNotWritable);
+    }
+
+    let parent = target.parent().ok_or(UpdateError::UnsafeTarget)?;
+    probe_directory_writable(parent).map_err(|_| UpdateError::TargetNotWritable)?;
+    Ok(())
+}
+
+fn probe_directory_writable(directory: &Path) -> std::io::Result<()> {
+    let probe = directory.join(format!(".codexstatus-update-probe-{}.tmp", std::process::id()));
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE.0)
+        .open(probe)
+        .map(drop)?;
+    Ok(())
+}
+
 fn update_asset_channel_for(channel: &str) -> Option<UpdateAssetChannel> {
     match channel {
         "stable" => Some(UpdateAssetChannel::Installed),
@@ -357,11 +384,15 @@ fn launch_target(target: &Path) -> Result<(), std::io::Error> {
 }
 
 fn validate_target(target: &Path) -> Result<(), UpdateError> {
-    if !target.is_absolute() {
+    if !target.is_absolute()
+        || target.components().any(|component| component == Component::ParentDir)
+    {
         return Err(UpdateError::UnsafeTarget);
     }
     let name = target.file_name().and_then(OsStr::to_str).unwrap_or_default().to_ascii_lowercase();
-    if !matches!(name.as_str(), "codexstatus.exe" | "codex-status.exe") {
+    let supported_name =
+        (name.starts_with("codexstatus") && name.ends_with(".exe")) || name == "codex-status.exe";
+    if !supported_name {
         return Err(UpdateError::UnsafeTarget);
     }
     Ok(())
@@ -528,6 +559,65 @@ mod tests {
             UpdateAssetChannel::Portable.asset_name("0.7.0"),
             "CodexStatus-v0.7.0-windows-x64-portable.exe"
         );
+    }
+
+    #[test]
+    fn target_validation_accepts_supported_portable_names_case_insensitively() {
+        for name in [
+            "CodexStatus.exe",
+            "codexstatus.exe",
+            "CODEXSTATUS-PORTABLE.EXE",
+            "CodexStatus-portable.exe",
+            "CodexStatus-v0.7.0-windows-x64-portable.exe",
+            "codex-status.exe",
+        ] {
+            let target = PathBuf::from(format!(r"C:\Apps\{name}"));
+            assert!(validate_target(&target).is_ok(), "should accept {name}");
+        }
+    }
+
+    #[test]
+    fn target_validation_rejects_unrelated_non_executable_and_unsafe_paths() {
+        for target in [
+            PathBuf::from(r"C:\Apps\quota.exe"),
+            PathBuf::from(r"C:\Apps\CodexStatus.dll"),
+            PathBuf::from(r"C:\Apps\codex-status-portable.exe"),
+            PathBuf::from(r"CodexStatus.exe"),
+            PathBuf::from(r"C:\Apps\..\CodexStatus.exe"),
+        ] {
+            assert!(
+                matches!(validate_target(&target), Err(UpdateError::UnsafeTarget)),
+                "should reject {}",
+                target.display()
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn update_preflight_rejects_a_read_only_executable_and_cleans_its_probe() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("codex-status-update-target-{suffix}"));
+        fs::create_dir_all(&directory).unwrap();
+        let target = directory.join("CodexStatus-portable.exe");
+        fs::write(&target, b"MZ test executable").unwrap();
+
+        assert!(validate_target_for_update(&target).is_ok());
+        assert!(fs::read_dir(&directory).unwrap().all(|entry| {
+            !entry.unwrap().file_name().to_string_lossy().starts_with(".codexstatus-update-probe-")
+        }));
+
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&target, permissions).unwrap();
+        assert!(matches!(validate_target_for_update(&target), Err(UpdateError::TargetNotWritable)));
+
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&target, permissions).unwrap();
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

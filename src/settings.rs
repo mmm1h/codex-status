@@ -24,6 +24,7 @@ pub struct Settings {
     pub last_weekly_pace_alert_reset: Option<i64>,
     pub last_session_pace_alert_reset: Option<i64>,
     pub last_update_check: Option<i64>,
+    pub unreplaceable_update_targets: Vec<String>,
 }
 
 impl Default for Settings {
@@ -46,6 +47,7 @@ impl Default for Settings {
             last_weekly_pace_alert_reset: None,
             last_session_pace_alert_reset: None,
             last_update_check: None,
+            unreplaceable_update_targets: Vec::new(),
         }
     }
 }
@@ -209,6 +211,7 @@ mod tests {
             service_status_checks: false,
             global_hotkey: true,
             flyout_pinned: true,
+            unreplaceable_update_targets: vec![r"c:\tools\unsupported-name.exe".to_owned()],
             ..Settings::default()
         };
         store.save_settings(&settings).unwrap();

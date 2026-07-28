@@ -2,6 +2,12 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.7.1] - 2026-07-28
+
+- Let a portable build update itself when it runs under the name it was downloaded with, such as `CodexStatus-v0.7.0-windows-x64-portable.exe`, instead of only as `CodexStatus.exe`.
+- Decide whether an update can be applied before downloading it, and say so, rather than downloading and verifying an update that is then discarded in silence once a day forever. The notice explains what to do and repeats only when the check is requested by hand.
+- Reject a parent-directory component in the replacement target, which the previous name check did not cover.
+
 ## [0.7.0] - 2026-07-28
 
 - Give stable, portable, beta, and development builds independent window, mutex, settings, startup, and tray identities. Portable tray icons use `HWND` plus `uID`, so moving the executable no longer changes its identity.

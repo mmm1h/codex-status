@@ -18,7 +18,7 @@ use chrono::{DateTime, Local, Utc};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::mem::size_of;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -265,6 +265,7 @@ enum UpdateCheckKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotificationKind {
     Alert,
+    ActionRequired,
     Test,
 }
 
@@ -1095,9 +1096,9 @@ impl AppState {
         }
     }
 
-    fn start_update_check(&mut self, kind: UpdateCheckKind) {
+    fn start_update_check(&mut self, kind: UpdateCheckKind) -> bool {
         if self.update_checking || self.pending_update.is_some() {
-            return;
+            return false;
         }
         if !updater::updates_supported() {
             if kind == UpdateCheckKind::Manual {
@@ -1109,7 +1110,37 @@ impl AppState {
                     ),
                 );
             }
-            return;
+            return false;
+        }
+        let target = match std::env::current_exe() {
+            Ok(target) => target,
+            Err(error) => {
+                match kind {
+                    UpdateCheckKind::Automatic => self.reset_update_timer(UPDATE_RETRY_MS),
+                    UpdateCheckKind::Manual => {
+                        self.schedule_update_check(UPDATE_INITIAL_DELAY_MS);
+                        self.show_update_check_failure(&error.to_string());
+                    }
+                }
+                return false;
+            }
+        };
+        if let Err(error) = updater::validate_target_for_update(&target) {
+            if matches!(
+                error,
+                updater::UpdateError::UnsafeTarget | updater::UpdateError::TargetNotWritable
+            ) {
+                self.handle_unreplaceable_update_target(kind, &target, &error);
+            } else {
+                match kind {
+                    UpdateCheckKind::Automatic => self.reset_update_timer(UPDATE_RETRY_MS),
+                    UpdateCheckKind::Manual => {
+                        self.schedule_update_check(UPDATE_INITIAL_DELAY_MS);
+                        self.show_update_check_failure(&error.to_string());
+                    }
+                }
+            }
+            return false;
         }
         if kind.bypasses_daily_throttle() {
             unsafe {
@@ -1145,6 +1176,58 @@ impl AppState {
                     self.show_update_check_failure(&error.to_string());
                 }
             }
+            return false;
+        }
+        true
+    }
+
+    fn handle_unreplaceable_update_target(
+        &mut self,
+        kind: UpdateCheckKind,
+        target: &Path,
+        error: &updater::UpdateError,
+    ) {
+        let target_key = update_target_key(target);
+        let should_notify = should_show_update_target_warning(
+            kind,
+            &self.settings.unreplaceable_update_targets,
+            &target_key,
+        );
+        let warning_changed = !self.settings.unreplaceable_update_targets.contains(&target_key);
+        if warning_changed || kind.records_last_check() {
+            let now = Utc::now().timestamp();
+            self.update_settings(|settings| {
+                if warning_changed {
+                    settings.unreplaceable_update_targets.push(target_key);
+                }
+                if kind.records_last_check() {
+                    settings.last_update_check = Some(now);
+                }
+            });
+        }
+        if kind == UpdateCheckKind::Automatic {
+            self.reset_update_timer(UPDATE_INTERVAL_SECONDS as u32 * 1_000);
+        }
+        if !should_notify {
+            return;
+        }
+
+        match error {
+            updater::UpdateError::UnsafeTarget => self.show_action_required_balloon(
+                self.locale.text("Automatic update unavailable", "无法自动更新"),
+                self.locale.text(
+                    "The executable name is not supported. Open Releases from the tray menu and download the latest version, or rename this file to CodexStatus.exe.",
+                    "当前可执行文件名不受支持。请从托盘菜单打开发布页并手动下载最新版，或将此文件重命名为 CodexStatus.exe。",
+                ),
+            ),
+            updater::UpdateError::TargetNotWritable => self.show_action_required_balloon(
+                self.locale.text("Automatic update unavailable", "无法自动更新"),
+                self.locale.text(
+                    "CodexStatus cannot replace the executable in this location. Move it to a writable folder, or open Releases and download the latest version manually.",
+                    "CodexStatus 无法替换当前位置的可执行文件。请将它移到可写文件夹，或打开发布页手动下载最新版。",
+                ),
+            ),
+            _ => self.show_update_check_failure(&error.to_string()),
         }
     }
 
@@ -1270,16 +1353,17 @@ impl AppState {
             self.try_apply_update();
             return;
         }
-        #[cfg(feature = "diagnostics")]
-        diagnostic_event("manual_update_check", serde_json::json!({ "result": "started" }));
-        self.show_balloon(
-            self.locale.text("Checking for updates", "正在检查更新"),
-            self.locale.text(
-                "CodexStatus is checking the latest release.",
-                "CodexStatus 正在检查最新发布版本。",
-            ),
-        );
-        self.start_update_check(UpdateCheckKind::Manual);
+        if self.start_update_check(UpdateCheckKind::Manual) {
+            #[cfg(feature = "diagnostics")]
+            diagnostic_event("manual_update_check", serde_json::json!({ "result": "started" }));
+            self.show_balloon(
+                self.locale.text("Checking for updates", "正在检查更新"),
+                self.locale.text(
+                    "CodexStatus is checking the latest release.",
+                    "CodexStatus 正在检查最新发布版本。",
+                ),
+            );
+        }
     }
 
     fn show_update_check_failure(&self, error: &str) {
@@ -1557,6 +1641,10 @@ impl AppState {
 
     fn show_balloon(&self, title: &str, body: &str) {
         let _ = self.submit_balloon(title, body, NotificationKind::Alert);
+    }
+
+    fn show_action_required_balloon(&self, title: &str, body: &str) {
+        let _ = self.submit_balloon(title, body, NotificationKind::ActionRequired);
     }
 
     fn submit_balloon(&self, title: &str, body: &str, kind: NotificationKind) -> bool {
@@ -2719,6 +2807,18 @@ fn automatic_update_delay(last_check: Option<i64>, now: i64, fallback_delay_ms: 
         .max(1_000)
 }
 
+fn update_target_key(target: &Path) -> String {
+    target.to_string_lossy().replace('/', "\\").to_ascii_lowercase()
+}
+
+fn should_show_update_target_warning(
+    kind: UpdateCheckKind,
+    warned_targets: &[String],
+    target_key: &str,
+) -> bool {
+    kind == UpdateCheckKind::Manual || !warned_targets.iter().any(|path| path == target_key)
+}
+
 fn set_alert_threshold(settings: &mut Settings, kind: QuotaKind, threshold: Option<u8>) -> bool {
     let (current, last_reset) = match kind {
         QuotaKind::Weekly => (&mut settings.alert_threshold, &mut settings.last_alert_reset),
@@ -3145,8 +3245,38 @@ mod tests {
     }
 
     #[test]
-    fn only_test_notifications_bypass_quiet_time() {
+    fn automatic_target_warnings_are_per_path_but_manual_checks_always_report() {
+        let target = update_target_key(Path::new(r"C:\Tools\quota.exe"));
+        assert!(should_show_update_target_warning(UpdateCheckKind::Automatic, &[], &target));
+        assert!(!should_show_update_target_warning(
+            UpdateCheckKind::Automatic,
+            std::slice::from_ref(&target),
+            &target
+        ));
+        assert!(should_show_update_target_warning(
+            UpdateCheckKind::Automatic,
+            std::slice::from_ref(&target),
+            &update_target_key(Path::new(r"C:\Other\quota.exe"))
+        ));
+        assert!(should_show_update_target_warning(
+            UpdateCheckKind::Manual,
+            std::slice::from_ref(&target),
+            &target
+        ));
+    }
+
+    #[test]
+    fn update_target_warning_keys_follow_windows_path_identity() {
+        assert_eq!(
+            update_target_key(Path::new(r"C:/Tools/CodexStatus.exe")),
+            update_target_key(Path::new(r"c:\tools\codexstatus.exe"))
+        );
+    }
+
+    #[test]
+    fn action_required_and_test_notifications_bypass_quiet_time() {
         assert!(NotificationKind::Alert.respects_quiet_time());
+        assert!(!NotificationKind::ActionRequired.respects_quiet_time());
         assert!(!NotificationKind::Test.respects_quiet_time());
     }
 
