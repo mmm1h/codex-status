@@ -273,10 +273,14 @@ fn resolve_commands() -> Result<Vec<CommandSpec>, AppServerError> {
     }
 
     let directories = path_directories();
-    resolve_commands_from(&directories)
+    let local_executables = local_codex_executables();
+    resolve_commands_from(&directories, &local_executables)
 }
 
-fn resolve_commands_from(directories: &[PathBuf]) -> Result<Vec<CommandSpec>, AppServerError> {
+fn resolve_commands_from(
+    directories: &[PathBuf],
+    local_executables: &[PathBuf],
+) -> Result<Vec<CommandSpec>, AppServerError> {
     let mut commands = Vec::new();
     // Public native installs are preferred. Store package internals can appear on PATH while
     // denying CreateProcess to unpackaged apps, so those candidates are tried last.
@@ -286,6 +290,14 @@ fn resolve_commands_from(directories: &[PathBuf]) -> Result<Vec<CommandSpec>, Ap
             && !executable.to_string_lossy().to_ascii_lowercase().contains("\\windowsapps\\")
         {
             commands.push(CommandSpec { program: executable, args: Vec::new() });
+        }
+    }
+    // Codex Desktop keeps an executable specifically for local app-server integrations outside
+    // PATH. These stable per-user locations remain usable when the packaged WindowsApps binary
+    // denies CreateProcess to an unpackaged tray application.
+    for executable in local_executables {
+        if executable.is_file() && !commands.iter().any(|command| command.program == *executable) {
+            commands.push(CommandSpec { program: executable.clone(), args: Vec::new() });
         }
     }
     for directory in directories {
@@ -305,6 +317,27 @@ fn resolve_commands_from(directories: &[PathBuf]) -> Result<Vec<CommandSpec>, Ap
         }
     }
     if commands.is_empty() { Err(AppServerError::CodexNotFound) } else { Ok(commands) }
+}
+
+fn local_codex_executables() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(root) = env::var_os("CODEX_HOME").map(PathBuf::from) {
+        roots.push(root);
+    }
+    if let Some(profile) = env::var_os("USERPROFILE").map(PathBuf::from) {
+        let root = profile.join(".codex");
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+
+    let mut executables = Vec::new();
+    for root in roots {
+        executables.push(root.join("bin").join("codex.exe"));
+        executables.push(root.join("plugins").join(".plugin-appserver").join("codex.exe"));
+        executables.push(root.join(".sandbox-bin").join("codex.exe"));
+    }
+    executables
 }
 
 fn command_from_path(path: PathBuf) -> Result<CommandSpec, AppServerError> {
@@ -439,8 +472,26 @@ mod tests {
         fs::write(&script, "").unwrap();
         fs::write(store.join("codex.exe"), "").unwrap();
 
-        let commands = resolve_commands_from(&[store.clone(), npm.clone()]).unwrap();
+        let commands = resolve_commands_from(&[store.clone(), npm.clone()], &[]).unwrap();
         assert_eq!(commands[0].program, npm.join("node.exe"));
+        assert_eq!(commands[1].program, store.join("codex.exe"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn puts_desktop_app_server_before_inaccessible_store_candidate() {
+        let directory = root("desktop-app-server");
+        let local = directory.join(".codex").join("plugins").join(".plugin-appserver");
+        let store = directory.join("WindowsApps").join("OpenAI.Codex");
+        fs::create_dir_all(&local).unwrap();
+        fs::create_dir_all(&store).unwrap();
+        fs::write(local.join("codex.exe"), "").unwrap();
+        fs::write(store.join("codex.exe"), "").unwrap();
+
+        let commands =
+            resolve_commands_from(std::slice::from_ref(&store), &[local.join("codex.exe")])
+                .unwrap();
+        assert_eq!(commands[0].program, local.join("codex.exe"));
         assert_eq!(commands[1].program, store.join("codex.exe"));
         fs::remove_dir_all(directory).unwrap();
     }

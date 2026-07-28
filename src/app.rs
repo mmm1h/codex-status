@@ -43,11 +43,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
     TrackMouseEvent, VK_ESCAPE,
 };
+#[cfg(not(codex_status_channel = "portable"))]
+use windows::Win32::UI::Shell::NIF_GUID;
 use windows::Win32::UI::Shell::{
-    NIF_GUID, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
-    NIIF_RESPECT_QUIET_TIME, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_BALLOONSHOW,
-    NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER,
-    Shell_NotifyIconGetRect, Shell_NotifyIconW, ShellExecuteW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME,
+    NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_BALLOONSHOW, NIN_SELECT,
+    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect,
+    Shell_NotifyIconW, ShellExecuteW,
 };
 #[cfg(feature = "diagnostics")]
 use windows::Win32::UI::Shell::{NIN_BALLOONHIDE, NIN_BALLOONTIMEOUT, NIN_BALLOONUSERCLICK};
@@ -71,16 +73,45 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMenuItemCount, GetMenuItemID, GetMenuItemInfoW, GetMenuState, GetSubMenu, MENUITEMINFOW,
     MFT_RADIOCHECK, MIIM_FTYPE,
 };
-use windows::core::{GUID, PCWSTR, w};
+#[cfg(not(codex_status_channel = "portable"))]
+use windows::core::GUID;
+use windows::core::{PCWSTR, w};
 
+#[cfg(codex_status_channel = "stable")]
 const MAIN_CLASS: PCWSTR = w!("CodexStatus.MainWindow.v1");
+#[cfg(codex_status_channel = "stable")]
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.FlyoutWindow.v1");
-#[cfg(not(feature = "diagnostics"))]
+#[cfg(codex_status_channel = "stable")]
 const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D");
-#[cfg(feature = "diagnostics")]
+#[cfg(codex_status_channel = "stable")]
+const TRAY_GUID: GUID = GUID::from_u128(0x22a261eb_26be_4fa8_854c_0447f2337d64);
+
+#[cfg(codex_status_channel = "beta")]
+const MAIN_CLASS: PCWSTR = w!("CodexStatus.Beta.MainWindow.v1");
+#[cfg(codex_status_channel = "beta")]
+const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Beta.FlyoutWindow.v1");
+#[cfg(codex_status_channel = "beta")]
+const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.Beta.CF8C5592-542F-47D2-A7B2-FA3EE023D0B3");
+#[cfg(codex_status_channel = "beta")]
+const TRAY_GUID: GUID = GUID::from_u128(0xcf8c5592_542f_47d2_a7b2_fa3ee023d0b3);
+
+#[cfg(codex_status_channel = "development")]
+const MAIN_CLASS: PCWSTR = w!("CodexStatus.Development.MainWindow.v1");
+#[cfg(codex_status_channel = "development")]
+const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Development.FlyoutWindow.v1");
+#[cfg(codex_status_channel = "development")]
 const MUTEX_NAME: PCWSTR =
-    w!("Local\\CodexStatus.Diagnostics.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D");
-const TRAY_GUID: GUID = GUID::from_u128(0x7a89d848_0611_4cb4_98c9_88ca9b59ff84);
+    w!("Local\\CodexStatus.Development.C4F400E1-9A66-410C-8CD4-BABD3AAB77B1");
+#[cfg(codex_status_channel = "development")]
+const TRAY_GUID: GUID = GUID::from_u128(0xc4f400e1_9a66_410c_8cd4_babd3aab77b1);
+
+#[cfg(codex_status_channel = "portable")]
+const MAIN_CLASS: PCWSTR = w!("CodexStatus.Portable.MainWindow.v1");
+#[cfg(codex_status_channel = "portable")]
+const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Portable.FlyoutWindow.v1");
+#[cfg(codex_status_channel = "portable")]
+const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.Portable.780AC163-DB94-4E7C-8976-712402FBA7A3");
+
 const TRAY_ID: u32 = 1;
 
 const WM_TRAY: u32 = WM_APP + 1;
@@ -1346,7 +1377,7 @@ impl AppState {
             self.theme.tray_dark,
         )?;
         let mut data = self.notify_data();
-        data.uFlags = NIF_GUID | NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+        data.uFlags |= NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
         data.uCallbackMessage = WM_TRAY;
         data.hIcon = icon.handle();
         let mut tooltip =
@@ -1398,13 +1429,25 @@ impl AppState {
     }
 
     fn notify_data(&self) -> NOTIFYICONDATAW {
-        NOTIFYICONDATAW {
-            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: self.hwnd,
-            uID: TRAY_ID,
-            guidItem: TRAY_GUID,
-            uFlags: NIF_GUID,
-            ..Default::default()
+        #[cfg(codex_status_channel = "portable")]
+        {
+            NOTIFYICONDATAW {
+                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: self.hwnd,
+                uID: TRAY_ID,
+                ..Default::default()
+            }
+        }
+        #[cfg(not(codex_status_channel = "portable"))]
+        {
+            NOTIFYICONDATAW {
+                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: self.hwnd,
+                uID: TRAY_ID,
+                guidItem: TRAY_GUID,
+                uFlags: NIF_GUID,
+                ..Default::default()
+            }
         }
     }
 
@@ -1429,7 +1472,7 @@ impl AppState {
             return false;
         }
         let mut data = self.notify_data();
-        data.uFlags = NIF_GUID | NIF_INFO;
+        data.uFlags |= NIF_INFO;
         data.dwInfoFlags =
             if respect_quiet_time { NIIF_INFO | NIIF_RESPECT_QUIET_TIME } else { NIIF_INFO };
         copy_utf16(&mut data.szInfoTitle, title);
@@ -1760,6 +1803,14 @@ impl AppState {
     }
 
     fn tray_rect(&self) -> Option<RECT> {
+        #[cfg(codex_status_channel = "portable")]
+        let identifier = NOTIFYICONIDENTIFIER {
+            cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+            hWnd: self.hwnd,
+            uID: TRAY_ID,
+            ..Default::default()
+        };
+        #[cfg(not(codex_status_channel = "portable"))]
         let identifier = NOTIFYICONIDENTIFIER {
             cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
             hWnd: self.hwnd,

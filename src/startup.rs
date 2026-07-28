@@ -4,7 +4,14 @@ use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(codex_status_channel = "stable")]
 const VALUE_NAME: &str = "CodexStatus";
+#[cfg(codex_status_channel = "beta")]
+const VALUE_NAME: &str = "CodexStatusBeta";
+#[cfg(codex_status_channel = "development")]
+const VALUE_NAME: &str = "CodexStatusDevelopment";
+#[cfg(codex_status_channel = "portable")]
+const VALUE_NAME: &str = "CodexStatusPortable";
 
 pub fn is_enabled() -> bool {
     std::env::current_exe().is_ok_and(|executable| is_enabled_for(&executable))

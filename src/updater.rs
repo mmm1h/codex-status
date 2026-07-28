@@ -195,9 +195,14 @@ impl HttpClient {
 }
 
 pub fn check_and_stage(updates_directory: &Path) -> Result<Option<StagedUpdate>, UpdateError> {
+    let Some(asset_channel) = update_asset_channel() else {
+        return Ok(None);
+    };
     let client = HttpClient::new()?;
     let metadata = client.get(RELEASE_API, "application/vnd.github+json", MAX_METADATA_BYTES)?;
-    let Some((version, asset, digest)) = select_asset(&metadata, env!("CARGO_PKG_VERSION"))? else {
+    let Some((version, asset, digest)) =
+        select_asset(&metadata, env!("CARGO_PKG_VERSION"), asset_channel)?
+    else {
         return Ok(None);
     };
     let bytes = client.get(
@@ -227,6 +232,7 @@ pub fn check_and_stage(updates_directory: &Path) -> Result<Option<StagedUpdate>,
 fn select_asset(
     metadata: &[u8],
     current_version: &str,
+    asset_channel: UpdateAssetChannel,
 ) -> Result<Option<(String, ReleaseAsset, String)>, UpdateError> {
     let release: Release = serde_json::from_slice(metadata)?;
     if release.draft || release.prerelease {
@@ -243,7 +249,7 @@ fn select_asset(
         return Ok(None);
     }
 
-    let expected_name = format!("CodexStatus-v{version}-windows-x64.exe");
+    let expected_name = asset_channel.asset_name(version);
     let Some(asset) = release.assets.into_iter().find(|asset| asset.name == expected_name) else {
         return Err(UpdateError::InvalidResponse);
     };
@@ -263,6 +269,32 @@ fn select_asset(
         return Err(UpdateError::InvalidResponse);
     }
     Ok(Some((version.to_owned(), asset, digest)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateAssetChannel {
+    Installed,
+    Portable,
+}
+
+impl UpdateAssetChannel {
+    fn asset_name(self, version: &str) -> String {
+        match self {
+            Self::Installed => {
+                format!("CodexStatus-v{version}-windows-x64-installed.exe")
+            }
+            Self::Portable => format!("CodexStatus-v{version}-windows-x64.exe"),
+        }
+    }
+}
+
+fn update_asset_channel() -> Option<UpdateAssetChannel> {
+    match env!("CODEX_STATUS_CHANNEL") {
+        "stable" => Some(UpdateAssetChannel::Installed),
+        "portable" => Some(UpdateAssetChannel::Portable),
+        "beta" | "development" => None,
+        _ => None,
+    }
 }
 
 pub fn launch_staged_update(update: &StagedUpdate) -> Result<(), UpdateError> {
@@ -371,15 +403,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn metadata(tag: &str, digest: &str) -> Vec<u8> {
+    fn metadata(tag: &str, digest: &str, asset_channel: UpdateAssetChannel) -> Vec<u8> {
+        let version = tag.strip_prefix('v').unwrap_or(tag);
         serde_json::to_vec(&json!({
             "tag_name": tag,
             "draft": false,
             "prerelease": false,
             "assets": [{
-                "name": format!("CodexStatus-{tag}-windows-x64.exe"),
+                "name": asset_channel.asset_name(version),
                 "browser_download_url": format!(
-                    "https://github.com/mmm1h/codex-status/releases/download/{tag}/CodexStatus-{tag}-windows-x64.exe"
+                    "https://github.com/mmm1h/codex-status/releases/download/{tag}/{}",
+                    asset_channel.asset_name(version)
                 ),
                 "size": 100_000,
                 "digest": format!("sha256:{digest}")
@@ -391,40 +425,103 @@ mod tests {
     #[test]
     fn selects_only_a_newer_stable_release_with_a_digest() {
         let digest = "a".repeat(64);
-        let selected = select_asset(&metadata("v0.2.0", &digest), "0.1.2").unwrap().unwrap();
+        let selected = select_asset(
+            &metadata("v0.2.0", &digest, UpdateAssetChannel::Portable),
+            "0.1.2",
+            UpdateAssetChannel::Portable,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(selected.0, "0.2.0");
         assert_eq!(selected.2, digest);
-        assert!(select_asset(&metadata("v0.2.0", &"b".repeat(64)), "0.2.0").unwrap().is_none());
+        assert!(
+            select_asset(
+                &metadata("v0.2.0", &"b".repeat(64), UpdateAssetChannel::Portable),
+                "0.2.0",
+                UpdateAssetChannel::Portable,
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]
     fn rejects_missing_or_malformed_digest() {
-        assert!(select_asset(&metadata("v0.2.0", "short"), "0.1.2").is_err());
+        assert!(
+            select_asset(
+                &metadata("v0.2.0", "short", UpdateAssetChannel::Portable),
+                "0.1.2",
+                UpdateAssetChannel::Portable,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn rejects_assets_that_violate_download_safety_boundaries() {
         let digest = "a".repeat(64);
-        let base: serde_json::Value = serde_json::from_slice(&metadata("v0.2.0", &digest)).unwrap();
+        let base: serde_json::Value =
+            serde_json::from_slice(&metadata("v0.2.0", &digest, UpdateAssetChannel::Portable))
+                .unwrap();
 
         let mut wrong_name = base.clone();
         wrong_name["assets"][0]["name"] = json!("CodexStatus.exe");
-        assert!(select_asset(&serde_json::to_vec(&wrong_name).unwrap(), "0.1.2").is_err());
+        assert!(
+            select_asset(
+                &serde_json::to_vec(&wrong_name).unwrap(),
+                "0.1.2",
+                UpdateAssetChannel::Portable,
+            )
+            .is_err()
+        );
 
         let mut wrong_url = base.clone();
         wrong_url["assets"][0]["browser_download_url"] =
             json!("https://example.com/CodexStatus-v0.2.0-windows-x64.exe");
-        assert!(select_asset(&serde_json::to_vec(&wrong_url).unwrap(), "0.1.2").is_err());
+        assert!(
+            select_asset(
+                &serde_json::to_vec(&wrong_url).unwrap(),
+                "0.1.2",
+                UpdateAssetChannel::Portable,
+            )
+            .is_err()
+        );
 
         let mut traversal_url = base.clone();
         traversal_url["assets"][0]["browser_download_url"] = json!(
             "https://github.com/mmm1h/codex-status/releases/download/v0.2.0/../CodexStatus.exe"
         );
-        assert!(select_asset(&serde_json::to_vec(&traversal_url).unwrap(), "0.1.2").is_err());
+        assert!(
+            select_asset(
+                &serde_json::to_vec(&traversal_url).unwrap(),
+                "0.1.2",
+                UpdateAssetChannel::Portable,
+            )
+            .is_err()
+        );
 
         let mut oversized = base;
         oversized["assets"][0]["size"] = json!(MAX_EXECUTABLE_BYTES as u64 + 1);
-        assert!(select_asset(&serde_json::to_vec(&oversized).unwrap(), "0.1.2").is_err());
+        assert!(
+            select_asset(
+                &serde_json::to_vec(&oversized).unwrap(),
+                "0.1.2",
+                UpdateAssetChannel::Portable,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn installed_and_portable_channels_select_different_assets() {
+        assert_eq!(
+            UpdateAssetChannel::Installed.asset_name("0.7.0"),
+            "CodexStatus-v0.7.0-windows-x64-installed.exe"
+        );
+        assert_eq!(
+            UpdateAssetChannel::Portable.asset_name("0.7.0"),
+            "CodexStatus-v0.7.0-windows-x64.exe"
+        );
     }
 
     #[test]

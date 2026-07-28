@@ -4,7 +4,14 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(codex_status_channel = "stable")]
 const APP_DIR: &str = "CodexStatus";
+#[cfg(codex_status_channel = "beta")]
+const APP_DIR: &str = "CodexStatusBeta";
+#[cfg(codex_status_channel = "development")]
+const APP_DIR: &str = "CodexStatusDevelopment";
+#[cfg(codex_status_channel = "portable")]
+const APP_DIR: &str = "CodexStatusPortable";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
