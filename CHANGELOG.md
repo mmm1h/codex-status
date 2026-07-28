@@ -2,6 +2,15 @@
 
 All notable changes to CodexStatus are documented here.
 
+## Unreleased
+
+- Give stable, portable, beta, and development builds independent window, mutex, settings, startup, and tray identities. Portable tray icons use `HWND` plus `uID`, so moving the executable no longer changes its identity.
+- Prefer Codex Desktop's per-user app-server executables ahead of inaccessible WindowsApps candidates while preserving `CODEX_STATUS_CODEX` as the explicit override and retaining npm/PATH fallbacks.
+- Publish and verify a dedicated portable executable asset; stable and portable builds update only from their matching asset, while beta and development builds do not self-update.
+- Keep diagnostics builds on a mutex distinct from the normal build of the same channel, preserving side-by-side menu diagnostics.
+- Preserve the post-v0.6.1 non-blocking pipe cleanup, refresh sequencing/watchdog, diagnostic rendering hooks, and compact flyout geometry after the PR branch forked from v0.6.1.
+- Seed the new portable settings directory from pre-channel state without overwriting new state, and recognize or remove a matching legacy portable startup entry without touching an installed build at another path.
+
 ## [0.6.1] - 2026-07-28
 
 - Match the reset-credit status case-insensitively, so a credit would still be counted if the service ever reported `Available` rather than `available`.

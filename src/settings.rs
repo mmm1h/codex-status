@@ -4,15 +4,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(codex_status_channel = "stable")]
-const APP_DIR: &str = "CodexStatus";
-#[cfg(codex_status_channel = "beta")]
-const APP_DIR: &str = "CodexStatusBeta";
-#[cfg(codex_status_channel = "development")]
-const APP_DIR: &str = "CodexStatusDevelopment";
-#[cfg(codex_status_channel = "portable")]
-const APP_DIR: &str = "CodexStatusPortable";
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -91,7 +82,11 @@ impl AppStore {
     pub fn discover() -> Self {
         let base =
             std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        Self { directory: base.join(APP_DIR) }
+        let directory = base.join(app_dir_for(env!("CODEX_STATUS_CHANNEL")));
+        if let Some(legacy) = legacy_app_dir_for(env!("CODEX_STATUS_CHANNEL")) {
+            let _ = migrate_legacy_store(&base.join(legacy), &directory);
+        }
+        Self { directory }
     }
 
     #[cfg(test)]
@@ -121,6 +116,44 @@ impl AppStore {
     pub fn updates_directory(&self) -> PathBuf {
         self.directory.join("updates")
     }
+}
+
+fn app_dir_for(channel: &str) -> &'static str {
+    match channel {
+        "stable" => "CodexStatus",
+        "beta" => "CodexStatusBeta",
+        "development" => "CodexStatusDevelopment",
+        "portable" => "CodexStatusPortable",
+        _ => unreachable!("build.rs validates CODEX_STATUS_CHANNEL"),
+    }
+}
+
+fn legacy_app_dir_for(channel: &str) -> Option<&'static str> {
+    match channel {
+        // Portable builds before channel isolation used the stable directory.
+        "portable" => Some("CodexStatus"),
+        "stable" | "beta" | "development" => None,
+        _ => unreachable!("build.rs validates CODEX_STATUS_CHANNEL"),
+    }
+}
+
+fn migrate_legacy_store(source: &Path, target: &Path) -> io::Result<()> {
+    for name in ["settings.json", "snapshot.json"] {
+        copy_if_missing(&source.join(name), &target.join(name))?;
+    }
+    Ok(())
+}
+
+fn copy_if_missing(source: &Path, target: &Path) -> io::Result<()> {
+    if !source.is_file() || target.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = target.with_extension("migration.tmp");
+    fs::copy(source, &temporary)?;
+    fs::rename(temporary, target)
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
@@ -181,5 +214,37 @@ mod tests {
         store.save_settings(&settings).unwrap();
         assert_eq!(store.load_settings(), settings);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn channel_directories_are_distinct_and_stable_keeps_its_published_path() {
+        assert_eq!(app_dir_for("stable"), "CodexStatus");
+        assert_eq!(app_dir_for("beta"), "CodexStatusBeta");
+        assert_eq!(app_dir_for("development"), "CodexStatusDevelopment");
+        assert_eq!(app_dir_for("portable"), "CodexStatusPortable");
+        assert_eq!(legacy_app_dir_for("portable"), Some("CodexStatus"));
+        assert_eq!(legacy_app_dir_for("stable"), None);
+    }
+
+    #[test]
+    fn portable_migration_copies_existing_state_without_overwriting_new_state() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("codex-status-migration-{suffix}"));
+        let legacy = root.join("CodexStatus");
+        let portable = root.join("CodexStatusPortable");
+        let legacy_store = AppStore::at(legacy.clone());
+        let portable_store = AppStore::at(portable.clone());
+        let legacy_settings = Settings { refresh_minutes: 15, ..Settings::default() };
+        legacy_store.save_settings(&legacy_settings).unwrap();
+
+        migrate_legacy_store(&legacy, &portable).unwrap();
+        assert_eq!(portable_store.load_settings(), legacy_settings);
+
+        let portable_settings = Settings { refresh_minutes: 1, ..Settings::default() };
+        portable_store.save_settings(&portable_settings).unwrap();
+        legacy_store.save_settings(&Settings::default()).unwrap();
+        migrate_legacy_store(&legacy, &portable).unwrap();
+        assert_eq!(portable_store.load_settings(), portable_settings);
+        fs::remove_dir_all(root).unwrap();
     }
 }

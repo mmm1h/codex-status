@@ -30,7 +30,11 @@ mod backdrop;
 mod direct2d;
 
 pub const CARD_WIDTH: i32 = 420;
-pub const CARD_HEIGHT: i32 = 440;
+pub const HEADER_HEIGHT: i32 = 52;
+pub const FACTS_TOP: i32 = 304;
+pub const SURFACE_BOTTOM: i32 = 380;
+pub const FOOTER_HEIGHT: i32 = 32;
+pub const CARD_HEIGHT: i32 = SURFACE_BOTTOM + FOOTER_HEIGHT;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RefreshButtonState {
@@ -395,9 +399,9 @@ unsafe fn draw_card(
             hdc,
             RECT {
                 left: scale(19, dpi),
-                top: scale(27, dpi),
+                top: scale(21, dpi),
                 right: scale(29, dpi),
-                bottom: scale(37, dpi),
+                bottom: scale(31, dpi),
             },
             scale(8, dpi),
             status_color,
@@ -408,9 +412,9 @@ unsafe fn draw_card(
             "Codex",
             RECT {
                 left: scale(39, dpi),
-                top: scale(10, dpi),
+                top: scale(8, dpi),
                 right: scale(106, dpi),
-                bottom: scale(56, dpi),
+                bottom: scale(44, dpi),
             },
             scale(18, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -425,7 +429,7 @@ unsafe fn draw_card(
                 left: scale(112, dpi),
                 top: scale(8, dpi),
                 right: scale(350, dpi),
-                bottom: scale(56, dpi),
+                bottom: scale(44, dpi),
             },
             scale(12, dpi),
             FW_NORMAL.0 as i32,
@@ -435,9 +439,9 @@ unsafe fn draw_card(
 
         let hero = RECT {
             left: scale(16, dpi),
-            top: scale(64, dpi),
+            top: scale(HEADER_HEIGHT, dpi),
             right: width - scale(16, dpi),
-            bottom: scale(392, dpi),
+            bottom: scale(SURFACE_BOTTOM, dpi),
         };
         if theme.high_contrast {
             outlined_surface(hdc, hero, scale(8, dpi), theme.surface, theme.line, dpi);
@@ -452,9 +456,9 @@ unsafe fn draw_card(
             locale.text("Weekly remaining", "本周剩余"),
             RECT {
                 left: scale(32, dpi),
-                top: scale(145, dpi),
+                top: scale(133, dpi),
                 right: scale(230, dpi),
-                bottom: scale(176, dpi),
+                bottom: scale(164, dpi),
             },
             scale(14, dpi),
             FW_NORMAL.0 as i32,
@@ -478,9 +482,9 @@ unsafe fn draw_card(
             locale.text("Reset in", "距离重置"),
             RECT {
                 left: scale(32, dpi),
-                top: scale(235, dpi),
+                top: scale(223, dpi),
                 right: width - scale(32, dpi),
-                bottom: scale(264, dpi),
+                bottom: scale(252, dpi),
             },
             scale(12, dpi),
             FW_NORMAL.0 as i32,
@@ -492,9 +496,9 @@ unsafe fn draw_card(
             &reset.0,
             RECT {
                 left: scale(32, dpi),
-                top: scale(258, dpi),
+                top: scale(246, dpi),
                 right: width - scale(32, dpi),
-                bottom: scale(291, dpi),
+                bottom: scale(279, dpi),
             },
             scale(20, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -506,9 +510,9 @@ unsafe fn draw_card(
             &reset.1,
             RECT {
                 left: scale(32, dpi),
-                top: scale(286, dpi),
+                top: scale(274, dpi),
                 right: width - scale(32, dpi),
-                bottom: scale(312, dpi),
+                bottom: scale(300, dpi),
             },
             scale(12, dpi),
             FW_NORMAL.0 as i32,
@@ -517,9 +521,9 @@ unsafe fn draw_card(
 
         let bar = RECT {
             left: scale(32, dpi),
-            top: scale(181, dpi),
+            top: scale(169, dpi),
             right: width - scale(32, dpi),
-            bottom: scale(189, dpi),
+            bottom: scale(177, dpi),
         };
         fill_rounded(hdc, bar, scale(4, dpi), theme.line);
         if let Some(value) = state.weekly_percent() {
@@ -549,9 +553,9 @@ unsafe fn draw_card(
             &pace_text,
             RECT {
                 left: scale(32, dpi),
-                top: scale(192, dpi),
+                top: scale(180, dpi),
                 right: width - scale(32, dpi),
-                bottom: scale(225, dpi),
+                bottom: scale(213, dpi),
             },
             scale(14, dpi),
             FW_NORMAL.0 as i32,
@@ -580,9 +584,9 @@ unsafe fn draw_card(
 
         let metrics = RECT {
             left: scale(16, dpi),
-            top: scale(316, dpi),
+            top: scale(FACTS_TOP, dpi),
             right: width - scale(16, dpi),
-            bottom: scale(392, dpi),
+            bottom: scale(SURFACE_BOTTOM, dpi),
         };
         if theme.high_contrast {
             outlined_surface(hdc, metrics, scale(8, dpi), theme.surface_alt, theme.line, dpi);
@@ -655,9 +659,9 @@ pub fn refresh_hit_test(x: i32, y: i32, dpi: u32) -> bool {
 pub fn refresh_rect(dpi: u32) -> RECT {
     RECT {
         left: scale(359, dpi),
-        top: scale(6, dpi),
+        top: 0,
         right: scale(413, dpi),
-        bottom: scale(58, dpi),
+        bottom: scale(HEADER_HEIGHT, dpi),
     }
 }
 
@@ -672,9 +676,9 @@ unsafe fn draw_refresh_button(
     unsafe {
         let rect = RECT {
             left: scale(368, dpi),
-            top: scale(14, dpi),
+            top: scale(8, dpi),
             right: scale(404, dpi),
-            bottom: scale(50, dpi),
+            bottom: scale(44, dpi),
         };
         let fill_color = refresh_button_fill(theme, state);
         if theme.high_contrast {
@@ -699,7 +703,7 @@ unsafe fn draw_refresh_button(
         if refreshing {
             let angle = (refresh_angle_degrees - 90.0).to_radians();
             let center_x = scale(386, dpi);
-            let center_y = scale(32, dpi);
+            let center_y = scale(26, dpi);
             let radius = scale(8, dpi);
             let marker = scale(3, dpi).max(2);
             let x = center_x + (radius as f32 * angle.cos()).round() as i32;
@@ -735,9 +739,9 @@ unsafe fn draw_percentage(
                 "--",
                 RECT {
                     left: scale(32, dpi),
-                    top: scale(68, dpi),
+                    top: scale(56, dpi),
                     right: scale(250, dpi),
-                    bottom: scale(151, dpi),
+                    bottom: scale(139, dpi),
                 },
                 scale(68, dpi),
                 FW_SEMIBOLD.0 as i32,
@@ -752,9 +756,9 @@ unsafe fn draw_percentage(
             &number,
             RECT {
                 left: scale(32, dpi),
-                top: scale(68, dpi),
+                top: scale(56, dpi),
                 right: scale(250, dpi),
-                bottom: scale(151, dpi),
+                bottom: scale(139, dpi),
             },
             scale(68, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -769,9 +773,9 @@ unsafe fn draw_percentage(
             "%",
             RECT {
                 left: number_left + number_width + scale(3, dpi),
-                top: scale(104, dpi),
+                top: scale(92, dpi),
                 right: scale(270, dpi),
-                bottom: scale(150, dpi),
+                bottom: scale(138, dpi),
             },
             scale(20, dpi),
             FW_NORMAL.0 as i32,
@@ -863,9 +867,9 @@ unsafe fn draw_footer(
         };
         let area = RECT {
             left: scale(32, dpi),
-            top: scale(400, dpi),
+            top: scale(388, dpi),
             right: width - scale(32, dpi),
-            bottom: scale(424, dpi),
+            bottom: scale(404, dpi),
         };
         if let Some(duration) = primary.duration.as_deref() {
             let font_size = scale(12, dpi);
@@ -1461,5 +1465,16 @@ mod tests {
         assert!(refresh_hit_test(392, 30, 96));
         assert!(!refresh_hit_test(350, 30, 96));
         assert!(refresh_hit_test(784, 60, 192));
+    }
+
+    #[test]
+    fn compact_bands_preserve_main_surface_proportions() {
+        assert_eq!(CARD_HEIGHT, 412);
+        assert_eq!(HEADER_HEIGHT, 52);
+        assert_eq!(FOOTER_HEIGHT, 32);
+        assert_eq!(SURFACE_BOTTOM - HEADER_HEIGHT, 328);
+        assert_eq!(SURFACE_BOTTOM - FACTS_TOP, 76);
+        assert_eq!(refresh_rect(96).top, 0);
+        assert_eq!(refresh_rect(96).bottom, HEADER_HEIGHT);
     }
 }

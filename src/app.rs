@@ -30,6 +30,7 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, HBRUSH, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint,
 };
+use windows::Win32::Media::{TIMERR_NOERROR, timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
@@ -82,16 +83,12 @@ const MAIN_CLASS: PCWSTR = w!("CodexStatus.MainWindow.v1");
 #[cfg(codex_status_channel = "stable")]
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.FlyoutWindow.v1");
 #[cfg(codex_status_channel = "stable")]
-const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D");
-#[cfg(codex_status_channel = "stable")]
 const TRAY_GUID: GUID = GUID::from_u128(0x7a89d848_0611_4cb4_98c9_88ca9b59ff84);
 
 #[cfg(codex_status_channel = "beta")]
 const MAIN_CLASS: PCWSTR = w!("CodexStatus.Beta.MainWindow.v1");
 #[cfg(codex_status_channel = "beta")]
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Beta.FlyoutWindow.v1");
-#[cfg(codex_status_channel = "beta")]
-const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.Beta.CF8C5592-542F-47D2-A7B2-FA3EE023D0B3");
 #[cfg(codex_status_channel = "beta")]
 const TRAY_GUID: GUID = GUID::from_u128(0xcf8c5592_542f_47d2_a7b2_fa3ee023d0b3);
 
@@ -100,17 +97,12 @@ const MAIN_CLASS: PCWSTR = w!("CodexStatus.Development.MainWindow.v1");
 #[cfg(codex_status_channel = "development")]
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Development.FlyoutWindow.v1");
 #[cfg(codex_status_channel = "development")]
-const MUTEX_NAME: PCWSTR =
-    w!("Local\\CodexStatus.Development.C4F400E1-9A66-410C-8CD4-BABD3AAB77B1");
-#[cfg(codex_status_channel = "development")]
 const TRAY_GUID: GUID = GUID::from_u128(0xc4f400e1_9a66_410c_8cd4_babd3aab77b1);
 
 #[cfg(codex_status_channel = "portable")]
 const MAIN_CLASS: PCWSTR = w!("CodexStatus.Portable.MainWindow.v1");
 #[cfg(codex_status_channel = "portable")]
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Portable.FlyoutWindow.v1");
-#[cfg(codex_status_channel = "portable")]
-const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.Portable.780AC163-DB94-4E7C-8976-712402FBA7A3");
 
 const TRAY_ID: u32 = 1;
 
@@ -135,8 +127,12 @@ const TIMER_STATUS: usize = 7;
 const TIMER_RENDERER_RELEASE: usize = 8;
 const TIMER_REFRESH_ANIMATION: usize = 9;
 const TIMER_TEST_NOTIFICATION_FEEDBACK: usize = 10;
-const REFRESH_ANIMATION_INTERVAL_MS: u32 = 34;
-const REFRESH_ANIMATION_STEP_DEGREES: u16 = 12;
+const TIMER_REFRESH_WATCHDOG: usize = 11;
+const REFRESH_ANIMATION_TARGET_FRAME_MS: u32 = 16;
+const REFRESH_ANIMATION_TIMER_MS: u32 = 8;
+const REFRESH_ANIMATION_STEP_DEGREES: u16 =
+    ((360 * REFRESH_ANIMATION_TARGET_FRAME_MS + 500) / 1_000) as u16;
+const REFRESH_WATCHDOG_MS: u32 = 24_000;
 const TEST_NOTIFICATION_FEEDBACK_MS: u32 = 2_500;
 
 const UPDATE_INITIAL_DELAY_MS: u32 = 90_000;
@@ -212,7 +208,47 @@ impl Drop for InstanceHandle {
 }
 
 struct RefreshOutcome {
+    id: u64,
     result: Result<QuotaSnapshot, String>,
+}
+
+#[derive(Debug, Default)]
+struct RefreshSequence {
+    next_id: u64,
+    active_id: Option<u64>,
+    pending_force: bool,
+}
+
+impl RefreshSequence {
+    fn begin(&mut self, force: bool, paused: bool) -> Option<u64> {
+        if paused || self.active_id.is_some() {
+            self.pending_force |= force;
+            return None;
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        self.active_id = Some(self.next_id);
+        Some(self.next_id)
+    }
+
+    fn finish(&mut self, id: u64) -> Option<bool> {
+        if self.active_id != Some(id) {
+            return None;
+        }
+        self.active_id = None;
+        Some(std::mem::take(&mut self.pending_force))
+    }
+
+    const fn is_active(&self) -> bool {
+        self.active_id.is_some()
+    }
+
+    const fn active_id(&self) -> Option<u64> {
+        self.active_id
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending_force = false;
+    }
 }
 
 struct UpdateOutcome {
@@ -270,11 +306,15 @@ struct AppState {
     client: AppServerClient,
     tray_icon: Option<OwnedIcon>,
     tray_added: bool,
-    refreshing: bool,
-    refresh_pending: bool,
+    refresh_sequence: RefreshSequence,
     refresh_hovered: bool,
     refresh_pointer_down: bool,
     refresh_angle_degrees: u16,
+    refresh_timer_resolution_active: bool,
+    #[cfg(feature = "diagnostics")]
+    refresh_animation_started: Option<Instant>,
+    #[cfg(feature = "diagnostics")]
+    refresh_animation_frames: u32,
     update_checking: bool,
     pending_update: Option<updater::StagedUpdate>,
     pending_update_manual: bool,
@@ -310,7 +350,8 @@ pub fn run() -> Result<(), AppError> {
     unsafe {
         SetLastError(WIN32_ERROR(0));
     }
-    let mutex = unsafe { InstanceHandle(CreateMutexW(None, false, MUTEX_NAME)?) };
+    let mutex_name = wide0(mutex_name_text());
+    let mutex = unsafe { InstanceHandle(CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr()))?) };
     let mutex_was_existing = unsafe { GetLastError() == ERROR_ALREADY_EXISTS };
     diagnostic("run:mutex");
     if mutex_was_existing {
@@ -320,6 +361,9 @@ pub fn run() -> Result<(), AppError> {
             }
         }
         return Ok(());
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        let _ = startup::migrate_legacy(&executable);
     }
 
     let instance = unsafe { HINSTANCE(GetModuleHandleW(None)?.0) };
@@ -399,11 +443,15 @@ pub fn run() -> Result<(), AppError> {
         client: AppServerClient::new(),
         tray_icon: None,
         tray_added: false,
-        refreshing: false,
-        refresh_pending: false,
+        refresh_sequence: RefreshSequence::default(),
         refresh_hovered: false,
         refresh_pointer_down: false,
         refresh_angle_degrees: 0,
+        refresh_timer_resolution_active: false,
+        #[cfg(feature = "diagnostics")]
+        refresh_animation_started: None,
+        #[cfg(feature = "diagnostics")]
+        refresh_animation_frames: 0,
         update_checking: false,
         pending_update: None,
         pending_update_manual: false,
@@ -668,7 +716,14 @@ unsafe extern "system" fn main_window_proc(
                             }
                         }
                         TIMER_REFRESH_ANIMATION => {
-                            if state.refreshing && IsWindowVisible(state.flyout).as_bool() {
+                            if state.refresh_sequence.is_active()
+                                && IsWindowVisible(state.flyout).as_bool()
+                            {
+                                #[cfg(feature = "diagnostics")]
+                                {
+                                    state.refresh_animation_frames =
+                                        state.refresh_animation_frames.saturating_add(1);
+                                }
                                 state.refresh_angle_degrees = state
                                     .refresh_angle_degrees
                                     .wrapping_add(REFRESH_ANIMATION_STEP_DEGREES)
@@ -679,6 +734,21 @@ unsafe extern "system" fn main_window_proc(
                                 );
                             } else {
                                 state.stop_refresh_animation();
+                            }
+                        }
+                        TIMER_REFRESH_WATCHDOG => {
+                            let _ = KillTimer(Some(hwnd), TIMER_REFRESH_WATCHDOG);
+                            if let Some(id) = state.refresh_sequence.active_id() {
+                                #[cfg(feature = "diagnostics")]
+                                diagnostic_event(
+                                    "refresh_watchdog",
+                                    serde_json::json!({ "id": id, "timeout_ms": REFRESH_WATCHDOG_MS }),
+                                );
+                                state.finish_refresh(RefreshOutcome {
+                                    id,
+                                    result: Err("Codex refresh timed out before cleanup completed"
+                                        .to_owned()),
+                                });
                             }
                         }
                         TIMER_TEST_NOTIFICATION_FEEDBACK => {
@@ -767,7 +837,7 @@ unsafe extern "system" fn flyout_window_proc(
                     state.locale,
                     state.theme,
                     refresh_button,
-                    state.refreshing,
+                    state.refresh_sequence.is_active(),
                     f32::from(state.refresh_angle_degrees),
                 );
                 return LRESULT(0);
@@ -802,7 +872,7 @@ unsafe extern "system" fn flyout_window_proc(
                 let state = &mut *state_ptr;
                 let (x, y) = message_point(lparam);
                 let dpi = GetDpiForWindow(hwnd).max(96);
-                if !state.refreshing && ui::refresh_hit_test(x, y, dpi) {
+                if !state.refresh_sequence.is_active() && ui::refresh_hit_test(x, y, dpi) {
                     state.refresh_hovered = true;
                     state.refresh_pointer_down = true;
                     let _ = SetCapture(hwnd);
@@ -815,7 +885,8 @@ unsafe extern "system" fn flyout_window_proc(
                 let (x, y) = message_point(lparam);
                 let dpi = GetDpiForWindow(hwnd).max(96);
                 let hit = ui::refresh_hit_test(x, y, dpi);
-                let activate = state.refresh_pointer_down && hit && !state.refreshing;
+                let activate =
+                    state.refresh_pointer_down && hit && !state.refresh_sequence.is_active();
                 state.refresh_pointer_down = false;
                 state.refresh_hovered = hit;
                 let _ = ReleaseCapture();
@@ -995,10 +1066,13 @@ impl AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
             let _ = KillTimer(Some(self.hwnd), TIMER_STATUS);
         }
-        if !paused {
-            self.refresh_pending = false;
+        if paused {
+            self.stop_refresh_animation();
+        } else {
+            self.refresh_sequence.clear_pending();
             self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
             self.start_refresh(false);
+            self.start_refresh_animation();
             if self.settings.service_status_checks {
                 self.reset_status_timer(5_000);
             }
@@ -1006,6 +1080,9 @@ impl AppState {
     }
 
     fn schedule_update_check(&self, fallback_delay_ms: u32) {
+        if !updater::updates_supported() {
+            return;
+        }
         let now = Utc::now().timestamp();
         let delay = automatic_update_delay(self.settings.last_update_check, now, fallback_delay_ms);
         self.reset_update_timer(delay);
@@ -1020,6 +1097,18 @@ impl AppState {
 
     fn start_update_check(&mut self, kind: UpdateCheckKind) {
         if self.update_checking || self.pending_update.is_some() {
+            return;
+        }
+        if !updater::updates_supported() {
+            if kind == UpdateCheckKind::Manual {
+                self.show_balloon(
+                    self.locale.text("Updates unavailable", "此构建不提供更新"),
+                    self.locale.text(
+                        "Development and beta builds do not install release-channel updates.",
+                        "development 与 beta 构建不会安装发布 channel 的更新。",
+                    ),
+                );
+            }
             return;
         }
         if kind.bypasses_daily_throttle() {
@@ -1221,15 +1310,13 @@ impl AppState {
 
     fn start_refresh(&mut self, force: bool) {
         diagnostic("refresh:start");
-        if self.refresh_paused {
-            self.refresh_pending |= force;
+        let Some(refresh_id) = self.refresh_sequence.begin(force, self.refresh_paused) else {
             return;
+        };
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_WATCHDOG);
+            let _ = SetTimer(Some(self.hwnd), TIMER_REFRESH_WATCHDOG, REFRESH_WATCHDOG_MS, None);
         }
-        if self.refreshing {
-            self.refresh_pending |= force;
-            return;
-        }
-        self.refreshing = true;
         self.start_refresh_animation();
         self.display.error = None;
         if self.display.snapshot.is_none() {
@@ -1248,8 +1335,18 @@ impl AppState {
             .spawn(move || {
                 let hwnd = HWND(hwnd_value as *mut std::ffi::c_void);
                 diagnostic("refresh:worker");
-                let outcome =
-                    RefreshOutcome { result: client.fetch().map_err(|error| error.to_string()) };
+                #[cfg(feature = "diagnostics")]
+                if let Some(milliseconds) =
+                    std::env::var("CODEX_STATUS_DIAGNOSTIC_REFRESH_STALL_MS")
+                        .ok()
+                        .and_then(|value| value.parse::<u64>().ok())
+                {
+                    thread::sleep(Duration::from_millis(milliseconds.min(60_000)));
+                }
+                let outcome = RefreshOutcome {
+                    id: refresh_id,
+                    result: client.fetch().map_err(|error| error.to_string()),
+                };
                 diagnostic(if outcome.result.is_ok() {
                     "refresh:success"
                 } else {
@@ -1267,13 +1364,21 @@ impl AppState {
             });
         if let Err(error) = spawn_result {
             self.finish_refresh(RefreshOutcome {
+                id: refresh_id,
                 result: Err(format!("Could not start refresh: {error}")),
             });
         }
     }
 
     fn finish_refresh(&mut self, outcome: RefreshOutcome) {
-        self.refreshing = false;
+        let Some(restart) = self.refresh_sequence.finish(outcome.id) else {
+            #[cfg(feature = "diagnostics")]
+            diagnostic_event("refresh_stale_completion", serde_json::json!({ "id": outcome.id }));
+            return;
+        };
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_WATCHDOG);
+        }
         self.stop_refresh_animation();
         match outcome.result {
             Ok(snapshot) => {
@@ -1301,8 +1406,7 @@ impl AppState {
         unsafe {
             let _ = InvalidateRect(Some(self.flyout), None, false);
         }
-        if self.refresh_pending {
-            self.refresh_pending = false;
+        if restart {
             self.start_refresh(true);
         }
     }
@@ -1781,23 +1885,63 @@ impl AppState {
     }
 
     fn start_refresh_animation(&mut self) {
-        if !self.refreshing || !unsafe { IsWindowVisible(self.flyout) }.as_bool() {
+        if !self.refresh_sequence.is_active()
+            || self.refresh_paused
+            || !unsafe { IsWindowVisible(self.flyout) }.as_bool()
+        {
             return;
         }
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
-            let _ = SetTimer(
+            if !self.refresh_timer_resolution_active && timeBeginPeriod(1) == TIMERR_NOERROR {
+                self.refresh_timer_resolution_active = true;
+            }
+            let timer = SetTimer(
                 Some(self.hwnd),
                 TIMER_REFRESH_ANIMATION,
-                REFRESH_ANIMATION_INTERVAL_MS,
+                REFRESH_ANIMATION_TIMER_MS,
                 None,
             );
+            #[cfg(feature = "diagnostics")]
+            if timer != 0 {
+                self.refresh_animation_started = Some(Instant::now());
+                self.refresh_animation_frames = 0;
+            }
+            #[cfg(not(feature = "diagnostics"))]
+            let _ = timer;
+            if timer == 0 && self.refresh_timer_resolution_active {
+                let _ = timeEndPeriod(1);
+                self.refresh_timer_resolution_active = false;
+            }
         }
     }
 
     fn stop_refresh_animation(&mut self) {
+        #[cfg(feature = "diagnostics")]
+        if let Some(started) = self.refresh_animation_started.take() {
+            let elapsed = started.elapsed();
+            diagnostic_event(
+                "refresh_animation_stopped",
+                serde_json::json!({
+                    "frames": self.refresh_animation_frames,
+                    "elapsed_ms": elapsed.as_millis(),
+                    "fps": if elapsed.is_zero() {
+                        0.0
+                    } else {
+                        f64::from(self.refresh_animation_frames) / elapsed.as_secs_f64()
+                    },
+                    "target_frame_ms": REFRESH_ANIMATION_TARGET_FRAME_MS,
+                    "timer_ms": REFRESH_ANIMATION_TIMER_MS,
+                }),
+            );
+            self.refresh_animation_frames = 0;
+        }
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
+            if self.refresh_timer_resolution_active {
+                let _ = timeEndPeriod(1);
+                self.refresh_timer_resolution_active = false;
+            }
         }
         self.refresh_angle_degrees = 0;
     }
@@ -2062,7 +2206,13 @@ impl AppState {
                 startup_enabled,
             )?;
             append(menu, CMD_RELEASES, self.locale.text("Open releases", "打开发布页"), false)?;
-            if self.update_checking || self.pending_update.is_some() {
+            if !updater::updates_supported() {
+                append_command_disabled(
+                    menu,
+                    CMD_CHECK_UPDATES,
+                    self.locale.text("Updates unavailable in this build", "此构建不提供自动更新"),
+                )?;
+            } else if self.update_checking || self.pending_update.is_some() {
                 append_command_disabled(
                     menu,
                     CMD_CHECK_UPDATES,
@@ -2263,7 +2413,7 @@ impl AppState {
                 "command": command,
                 "settings": self.settings,
                 "hotkey_registered": self.hotkey.is_some(),
-                "refreshing": self.refreshing,
+                "refreshing": self.refresh_sequence.is_active(),
                 "tray_added": self.tray_added,
             }),
         );
@@ -2630,6 +2780,11 @@ impl Drop for AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_RENDERER_RELEASE);
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
             let _ = KillTimer(Some(self.hwnd), TIMER_TEST_NOTIFICATION_FEEDBACK);
+            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_WATCHDOG);
+            if self.refresh_timer_resolution_active {
+                let _ = timeEndPeriod(1);
+                self.refresh_timer_resolution_active = false;
+            }
             if self.tray_added {
                 let data = self.notify_data();
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
@@ -2708,6 +2863,32 @@ fn copy_utf16<const N: usize>(target: &mut [u16; N], value: &str) {
         target.iter_mut().take(N.saturating_sub(1)).zip(value.encode_utf16())
     {
         *destination = source;
+    }
+}
+
+fn mutex_name_text() -> &'static str {
+    mutex_name_for(env!("CODEX_STATUS_CHANNEL"), cfg!(feature = "diagnostics"))
+}
+
+fn mutex_name_for(channel: &str, diagnostics: bool) -> &'static str {
+    match (channel, diagnostics) {
+        ("stable", false) => "Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D",
+        ("stable", true) => "Local\\CodexStatus.Diagnostics.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D",
+        ("beta", false) => "Local\\CodexStatus.Beta.CF8C5592-542F-47D2-A7B2-FA3EE023D0B3",
+        ("beta", true) => {
+            "Local\\CodexStatus.Beta.Diagnostics.CF8C5592-542F-47D2-A7B2-FA3EE023D0B3"
+        }
+        ("development", false) => {
+            "Local\\CodexStatus.Development.C4F400E1-9A66-410C-8CD4-BABD3AAB77B1"
+        }
+        ("development", true) => {
+            "Local\\CodexStatus.Development.Diagnostics.C4F400E1-9A66-410C-8CD4-BABD3AAB77B1"
+        }
+        ("portable", false) => "Local\\CodexStatus.Portable.780AC163-DB94-4E7C-8976-712402FBA7A3",
+        ("portable", true) => {
+            "Local\\CodexStatus.Portable.Diagnostics.780AC163-DB94-4E7C-8976-712402FBA7A3"
+        }
+        _ => unreachable!("build.rs validates CODEX_STATUS_CHANNEL"),
     }
 }
 
@@ -2859,6 +3040,31 @@ mod tests {
     }
 
     #[test]
+    fn mutex_names_isolate_every_channel_and_diagnostics_build() {
+        let mut names = std::collections::HashSet::new();
+        for channel in ["stable", "beta", "development", "portable"] {
+            let normal = mutex_name_for(channel, false);
+            let diagnostics = mutex_name_for(channel, true);
+            assert_ne!(normal, diagnostics);
+            assert!(names.insert(normal));
+            assert!(names.insert(diagnostics));
+        }
+        assert_eq!(names.len(), 8);
+        assert_eq!(
+            mutex_name_for("stable", false),
+            "Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D"
+        );
+        assert_eq!(
+            mutex_name_for("stable", true),
+            "Local\\CodexStatus.Diagnostics.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D"
+        );
+        assert_eq!(
+            mutex_name_text(),
+            mutex_name_for(env!("CODEX_STATUS_CHANNEL"), cfg!(feature = "diagnostics"))
+        );
+    }
+
+    #[test]
     fn persisted_cycle_prevents_a_duplicate_weekly_alert_after_restart() {
         let now = 1_000_000;
         let reset = now + 60;
@@ -2959,5 +3165,35 @@ mod tests {
             ),
             UPDATE_INITIAL_DELAY_MS
         );
+    }
+
+    #[test]
+    fn forced_refreshes_coalesce_and_stale_completions_cannot_finish_a_new_cycle() {
+        let mut sequence = RefreshSequence::default();
+        let first = sequence.begin(true, false).unwrap();
+        assert!(sequence.begin(true, false).is_none());
+        assert_eq!(sequence.finish(first), Some(true));
+
+        let second = sequence.begin(true, false).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(sequence.finish(first), None);
+        assert_eq!(sequence.active_id(), Some(second));
+        assert_eq!(sequence.finish(second), Some(false));
+    }
+
+    #[test]
+    fn automatic_refresh_does_not_queue_behind_an_active_cycle() {
+        let mut sequence = RefreshSequence::default();
+        let active = sequence.begin(false, false).unwrap();
+        assert!(sequence.begin(false, false).is_none());
+        assert_eq!(sequence.finish(active), Some(false));
+    }
+
+    #[test]
+    fn paused_refresh_requests_do_not_start_until_resume() {
+        let mut sequence = RefreshSequence::default();
+        assert!(sequence.begin(true, true).is_none());
+        sequence.clear_pending();
+        assert!(sequence.begin(false, false).is_some());
     }
 }

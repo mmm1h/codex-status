@@ -10,7 +10,13 @@ permissions:
 
 jobs:
   windows:
+    name: Windows (${{ matrix.channel }}, ${{ matrix.mode }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [default, stable, portable]
+        mode: [normal, diagnostics]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -20,8 +26,41 @@ jobs:
       - name: Format
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+        shell: pwsh
+        run: |
+          if ("${{ matrix.channel }}" -eq "default") {
+            Remove-Item Env:CODEX_STATUS_CHANNEL -ErrorAction SilentlyContinue
+          } else {
+            $env:CODEX_STATUS_CHANNEL = "${{ matrix.channel }}"
+          }
+          $featureArgs = @()
+          if ("${{ matrix.mode }}" -eq "diagnostics") {
+            $featureArgs = @("--features", "diagnostics")
+          }
+          cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc @featureArgs -- -D warnings
       - name: Test
-        run: cargo test --locked --all-targets --target x86_64-pc-windows-msvc
+        shell: pwsh
+        run: |
+          if ("${{ matrix.channel }}" -eq "default") {
+            Remove-Item Env:CODEX_STATUS_CHANNEL -ErrorAction SilentlyContinue
+          } else {
+            $env:CODEX_STATUS_CHANNEL = "${{ matrix.channel }}"
+          }
+          $featureArgs = @()
+          if ("${{ matrix.mode }}" -eq "diagnostics") {
+            $featureArgs = @("--features", "diagnostics")
+          }
+          cargo test --locked --all-targets --target x86_64-pc-windows-msvc @featureArgs
       - name: Release build
-        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+        shell: pwsh
+        run: |
+          if ("${{ matrix.channel }}" -eq "default") {
+            Remove-Item Env:CODEX_STATUS_CHANNEL -ErrorAction SilentlyContinue
+          } else {
+            $env:CODEX_STATUS_CHANNEL = "${{ matrix.channel }}"
+          }
+          $featureArgs = @()
+          if ("${{ matrix.mode }}" -eq "diagnostics") {
+            $featureArgs = @("--features", "diagnostics")
+          }
+          cargo build --locked --release --target x86_64-pc-windows-msvc @featureArgs

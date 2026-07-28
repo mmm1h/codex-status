@@ -287,7 +287,15 @@ impl UpdateAssetChannel {
 }
 
 fn update_asset_channel() -> Option<UpdateAssetChannel> {
-    match env!("CODEX_STATUS_CHANNEL") {
+    update_asset_channel_for(env!("CODEX_STATUS_CHANNEL"))
+}
+
+pub fn updates_supported() -> bool {
+    update_asset_channel().is_some()
+}
+
+fn update_asset_channel_for(channel: &str) -> Option<UpdateAssetChannel> {
+    match channel {
         "stable" => Some(UpdateAssetChannel::Installed),
         "portable" => Some(UpdateAssetChannel::Portable),
         "beta" | "development" => None,
@@ -520,6 +528,14 @@ mod tests {
             UpdateAssetChannel::Portable.asset_name("0.7.0"),
             "CodexStatus-v0.7.0-windows-x64-portable.exe"
         );
+    }
+
+    #[test]
+    fn development_and_beta_builds_never_install_stable_assets() {
+        assert_eq!(update_asset_channel_for("stable"), Some(UpdateAssetChannel::Installed));
+        assert_eq!(update_asset_channel_for("portable"), Some(UpdateAssetChannel::Portable));
+        assert_eq!(update_asset_channel_for("development"), None);
+        assert_eq!(update_asset_channel_for("beta"), None);
     }
 
     #[test]
