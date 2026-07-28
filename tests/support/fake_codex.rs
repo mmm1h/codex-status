@@ -2,11 +2,17 @@
 //! It is not part of the CodexStatus binary or release archives.
 
 use std::io::{self, BufRead, Write};
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
+    if std::env::args().any(|argument| argument == "--hold-inherited-pipes") {
+        thread::sleep(Duration::from_secs(60));
+        return;
+    }
+
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let weekly_remaining = std::env::var("CODEX_STATUS_FAKE_WEEKLY_REMAINING")
         .ok()
@@ -17,6 +23,8 @@ fn main() {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
+    let inherited_pipe_stall =
+        std::env::var_os("CODEX_STATUS_FAKE_INHERITED_PIPE_STALL").is_some();
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     for line in stdin.lock().lines().map_while(Result::ok) {
@@ -29,6 +37,12 @@ fn main() {
             )
             .unwrap();
         } else if line.contains("\"id\":2") {
+            if inherited_pipe_stall {
+                let _ = Command::new(std::env::current_exe().unwrap())
+                    .arg("--hold-inherited-pipes")
+                    .spawn();
+                return;
+            }
             thread::sleep(Duration::from_millis(delay_ms));
             writeln!(
                 stdout,

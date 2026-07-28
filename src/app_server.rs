@@ -4,12 +4,13 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -18,6 +19,7 @@ use windows::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject,
 };
+use windows::Win32::System::Pipes::PeekNamedPipe;
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -97,19 +99,16 @@ impl Default for AppServerClient {
 
 fn fetch_with_command(command: &CommandSpec) -> Result<QuotaSnapshot, AppServerError> {
     let mut child = spawn(command)?;
-    let _job = JobGuard::assign(&child).ok();
+    let job = JobGuard::assign(&child).ok();
     let stdout = child.stdout.take().ok_or(AppServerError::Closed)?;
     let stderr = child.stderr.take().ok_or(AppServerError::Closed)?;
     let mut stdin = child.stdin.take().ok_or(AppServerError::Closed)?;
     let (sender, receiver) = mpsc::channel::<String>();
-    let reader = thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if sender.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let error_reader = thread::spawn(move || read_capped(stderr, 4096));
+    let stop_readers = Arc::new(AtomicBool::new(false));
+    let stdout_stop = Arc::clone(&stop_readers);
+    let reader = thread::spawn(move || read_lines(stdout, sender, &stdout_stop));
+    let stderr_stop = Arc::clone(&stop_readers);
+    let error_reader = thread::spawn(move || read_capped(stderr, 4096, &stderr_stop));
 
     let result = (|| {
         write_json(
@@ -146,6 +145,10 @@ fn fetch_with_command(command: &CommandSpec) -> Result<QuotaSnapshot, AppServerE
 
     drop(stdin);
     terminate(&mut child);
+    // Descendants can inherit the app-server's stdout/stderr handles. Close the
+    // kill-on-close job, then cancel the polling readers without waiting for EOF.
+    drop(job);
+    stop_readers.store(true, Ordering::Release);
     let _ = reader.join();
     let stderr = error_reader.join().unwrap_or_default();
 
@@ -249,10 +252,75 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
-fn read_capped(reader: impl Read, limit: usize) -> String {
+fn read_lines(mut stdout: ChildStdout, sender: mpsc::Sender<String>, stop: &AtomicBool) {
+    let mut pending = Vec::new();
+    loop {
+        let stopping = stop.load(Ordering::Acquire);
+        let Ok(available) = pipe_bytes_available(&stdout) else {
+            break;
+        };
+        if available == 0 {
+            if stopping {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+            continue;
+        }
+        let mut chunk = vec![0; available.min(4_096)];
+        let Ok(read) = stdout.read(&mut chunk) else {
+            break;
+        };
+        if read == 0 {
+            break;
+        }
+        pending.extend_from_slice(&chunk[..read]);
+        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+            let mut line: Vec<_> = pending.drain(..=newline).collect();
+            while line.last().is_some_and(|byte| matches!(byte, b'\r' | b'\n')) {
+                line.pop();
+            }
+            if sender.send(String::from_utf8_lossy(&line).into_owned()).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+fn read_capped(mut stderr: ChildStderr, limit: usize, stop: &AtomicBool) -> String {
     let mut bytes = Vec::with_capacity(limit);
-    let _ = reader.take(limit as u64).read_to_end(&mut bytes);
+    loop {
+        let stopping = stop.load(Ordering::Acquire);
+        let Ok(available) = pipe_bytes_available(&stderr) else {
+            break;
+        };
+        if available == 0 {
+            if stopping {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+            continue;
+        }
+        let remaining = limit.saturating_sub(bytes.len());
+        let mut chunk = vec![0; available.min(remaining.max(1)).min(4_096)];
+        let Ok(read) = stderr.read(&mut chunk) else {
+            break;
+        };
+        if read == 0 {
+            break;
+        }
+        if remaining > 0 {
+            bytes.extend_from_slice(&chunk[..read.min(remaining)]);
+        }
+    }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn pipe_bytes_available(reader: &impl AsRawHandle) -> windows::core::Result<usize> {
+    let mut available = 0;
+    unsafe {
+        PeekNamedPipe(HANDLE(reader.as_raw_handle()), None, 0, None, Some(&mut available), None)?;
+    }
+    Ok(available as usize)
 }
 
 #[derive(Debug, Deserialize)]
