@@ -1,7 +1,7 @@
 ---
 version: alpha
-name: CodexStatus Liquid Aurora
-description: A compact native quota flyout built from quiet data hierarchy and softly refracted glass.
+name: CodexStatus Native Aurora Lite
+description: A compact native quota monitor built from one clear Acrylic canvas and a softly refracted information plane.
 colors:
   primary: "#10a37f"
   neutral-hero-light: "#202429"
@@ -43,8 +43,8 @@ typography:
     lineHeight: 1.35
 rounded:
   gauge: "4px"
-  control: "9px"
-  surface: "12px"
+  control: "11px"
+  surface: "16px"
 spacing:
   micro: "4px"
   compact: "8px"
@@ -96,9 +96,9 @@ components:
 
 ## Overview
 
-**Creative North Star: "Liquid Aurora"**
+**Creative North Star: "Native Aurora Lite"**
 
-CodexStatus should feel like a compact native instrument viewed through a thin, luminous material. Cyan, rose, apricot, and a trace of violet appear as large refracted volumes behind the interface; they never become text effects or decorative outlines. The number remains the clearest object on the surface.
+CodexStatus should feel like a compact native instrument viewed through a thin, luminous material. Cyan, rose, and apricot appear as large refracted volumes behind the interface; they never become text effects or decorative outlines. The number remains the clearest object on the surface.
 
 Light mode is clear and softly luminous. Dark mode is transparent black glass with restrained, low-luminance color pools—not a whitened or grey frosted card.
 
@@ -106,6 +106,7 @@ Light mode is clear and softly luminous. Dark mode is transparent black glass wi
 
 - Neutral, number-first information hierarchy.
 - Real Acrylic/DirectComposition translucency with an opaque accessibility fallback.
+- One integrated information surface rather than stacked glass cards.
 - Large ambient color fields rather than rainbow borders or gradient text.
 - Compact native density and unchanged product semantics.
 
@@ -150,31 +151,31 @@ The palette combines graphite neutrals with three atmospheric color pools and on
 
 ## Layout
 
-The flyout is a fixed 420 × 412 logical-pixel native surface that scales per monitor DPI. A 52px header and 32px footer frame two inset content surfaces. Primary content uses 32px horizontal alignment; surface edges use 16px insets. The quota, gauge, pace, reset timing, and facts preserve the existing scan order and localization behavior.
+The flyout is a fixed 420 × 412 logical-pixel native surface that scales per monitor DPI. The 36px refresh control and 18px brand sit in the outer Acrylic header. One inset information surface runs from `(14, 58)` to `(406, 366)` with 16px corners. Its hero is a true two-column composition: weekly quota on the left and reset timing right-aligned on the right, followed by the 8px gauge, pace/status row, an internal separator, and the facts grid. Primary text aligns to x=32. The compact footer remains on the outer Acrylic.
 
 ## Elevation & Depth
 
-Depth comes from Acrylic blur, transparent tonal layering, one soft offset shadow, and a narrow top-edge highlight. The interface avoids stacked glass-on-glass fog: content cards are dark transparent layers in dark mode and clear white layers in light mode, while the Aurora pools remain behind them.
+Depth comes from Acrylic blur, one transparent tonal layer, a quiet optical keyline, and broad Gaussian-blurred Aurora light. The inner information surface has no drop shadow. This avoids stacked glass-on-glass fog while keeping the desktop context visible.
 
 **The Black-Glass Rule.** Dark surfaces must remain visibly black; increasing translucency must never be simulated by adding a milky grey veil.
 
 ## Shapes
 
-Content surfaces use 12px corners, the refresh control uses 9px corners, and the 8px capacity gauge uses a 4px full-pill radius. Borders are single-pixel optical separators and never carry the Aurora spectrum.
+The information surface uses 16px corners, the refresh control uses 11px corners, and the 8px capacity gauge uses a 4px full-pill radius. Borders are single-pixel optical separators and never carry the Aurora spectrum.
 
 ## Components
 
 ### Refresh Control
 
-- **Shape:** Compact rounded square with a 36px hit area and 9px corners.
+- **Shape:** Compact rounded square with a 36px visual body, 54px header hit area, and 11px corners.
 - **Color:** Neutral translucent fill; the icon follows muted, hover, pressed, and high-contrast roles.
 - **Motion:** The native ring arrow rotates only while refresh is active.
 
-### Cards / Containers
+### Information Surface
 
-- **Corner Style:** Soft native surface corners (12px).
+- **Corner Style:** Soft native surface corners (16px).
 - **Background:** Theme-specific transparent glass with a subtle diagonal sheen.
-- **Shadow Strategy:** One ambient offset shadow for separation from the outer material.
+- **Shadow Strategy:** No nested surface shadow; separation comes from tonal contrast and one optical keyline.
 - **Border:** A quiet white optical edge, stronger in light mode and restrained in dark mode.
 
 ### Capacity Gauge
