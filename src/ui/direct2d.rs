@@ -19,21 +19,22 @@ use windows::Win32::Foundation::{COLORREF, D2DERR_RECREATE_TARGET, HMODULE, HWND
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
     D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
+    D2D1_FILL_MODE_ALTERNATE, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
-    D2D1_COLOR_SPACE_SRGB, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_INTERPOLATION_MODE_LINEAR,
-    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
-    D2D1_PROPERTY_TYPE_FLOAT, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
-    D2D1_SATURATION_PROP_SATURATION, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory,
-    ID2D1Bitmap1, ID2D1Brush, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1Geometry,
-    ID2D1Image, ID2D1LinearGradientBrush, ID2D1RadialGradientBrush, ID2D1SolidColorBrush,
-    ID2D1StrokeStyle,
+    CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation, CLSID_D2D1Shadow,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
+    D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
+    D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT, D2D1_COLOR_SPACE_SRGB,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_VECTOR4,
+    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_SATURATION_PROP_SATURATION,
+    D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap1, ID2D1Brush,
+    ID2D1CommandList, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1Geometry, ID2D1Image,
+    ID2D1LinearGradientBrush, ID2D1RadialGradientBrush, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
@@ -786,7 +787,7 @@ fn draw_background_layer(
     target: &ID2D1DeviceContext,
     theme: Theme,
     glass_enabled: bool,
-) -> Result<Option<windows::Win32::Graphics::Direct2D::ID2D1CommandList>> {
+) -> Result<Option<ID2D1CommandList>> {
     unsafe {
         target.Clear(Some(&color_alpha(rgb(0, 0, 0), 0.0)));
     }
@@ -856,14 +857,18 @@ fn draw_surface_layer(
     target: &ID2D1DeviceContext,
     brushes: &Brushes,
     theme: Theme,
-    background: Option<&windows::Win32::Graphics::Direct2D::ID2D1CommandList>,
+    background: Option<&ID2D1CommandList>,
 ) -> Result<()> {
     let surface = rounded_rect(14.0, 58.0, 406.0, 366.0, 16.0);
+
+    if !theme.high_contrast {
+        draw_surface_shadow(target, &surface, theme)?;
+    }
 
     if !theme.high_contrast
         && let Some(background) = background
     {
-        draw_surface_backdrop(target, background, &surface)?;
+        draw_surface_backdrop(target, background, &surface, theme)?;
     }
 
     let surface_top = if theme.dark { rgb(8, 12, 16) } else { rgb(255, 255, 255) };
@@ -875,16 +880,16 @@ fn draw_surface_layer(
         if theme.high_contrast {
             1.0
         } else if theme.dark {
-            0.13
+            0.07
         } else {
-            0.18
+            0.11
         },
         if theme.high_contrast {
             1.0
         } else if theme.dark {
-            0.10
+            0.045
         } else {
-            0.12
+            0.06
         },
         Vector2 { X: 18.0, Y: 62.0 },
         Vector2 { X: 400.0, Y: 360.0 },
@@ -896,9 +901,9 @@ fn draw_surface_layer(
         if theme.high_contrast {
             0.0
         } else if theme.dark {
-            0.02
+            0.035
         } else {
-            0.07
+            0.10
         },
         0.0,
         Vector2 { X: 24.0, Y: 62.0 },
@@ -913,7 +918,7 @@ fn draw_surface_layer(
             let keyline = solid_brush_alpha(
                 target,
                 rgb(255, 255, 255),
-                if theme.dark { 0.085 } else { 0.60 },
+                if theme.dark { 0.15 } else { 0.74 },
             )?;
             target.DrawRoundedRectangle(&surface, &keyline, 1.0, None::<&ID2D1StrokeStyle>);
         }
@@ -921,15 +926,93 @@ fn draw_surface_layer(
     Ok(())
 }
 
+fn draw_surface_shadow(
+    target: &ID2D1DeviceContext,
+    surface: &D2D1_ROUNDED_RECT,
+    theme: Theme,
+) -> Result<()> {
+    let original = unsafe { target.GetTarget()? };
+    let mask = unsafe { target.CreateCommandList()? };
+    unsafe {
+        target.SetTarget(&mask);
+        target.Clear(Some(&color_alpha(rgb(0, 0, 0), 0.0)));
+        let fill = solid_brush(target, rgb(255, 255, 255))?;
+        target.FillRoundedRectangle(surface, &fill);
+        target.SetTarget(&original);
+        mask.Close()?;
+    }
+
+    let factory = unsafe { target.GetFactory()? };
+    let outer: ID2D1Geometry =
+        unsafe { factory.CreateRectangleGeometry(&rect(0.0, 0.0, 420.0, 412.0))?.cast()? };
+    let inner: ID2D1Geometry = unsafe { factory.CreateRoundedRectangleGeometry(surface)?.cast()? };
+    let outside: ID2D1Geometry = unsafe {
+        factory
+            .CreateGeometryGroup(D2D1_FILL_MODE_ALTERNATE, &[Some(outer), Some(inner)])?
+            .cast()?
+    };
+    let layer = unsafe { target.CreateLayer(None)? };
+    let parameters = D2D1_LAYER_PARAMETERS1 {
+        contentBounds: rect(0.0, 0.0, 420.0, 412.0),
+        geometricMask: ManuallyDrop::new(Some(outside)),
+        maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        maskTransform: Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0 },
+        opacity: 1.0,
+        opacityBrush: ManuallyDrop::new(None),
+        layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+    };
+    let (ambient_alpha, contact_alpha) = if theme.dark { (0.46, 0.34) } else { (0.26, 0.20) };
+    unsafe { target.PushLayer(&parameters, &layer) };
+    let result = draw_shadow_pass(target, &mask, 7.5, ambient_alpha, 6.0)
+        .and_then(|()| draw_shadow_pass(target, &mask, 2.2, contact_alpha, 2.0));
+    unsafe { target.PopLayer() };
+    result
+}
+
+fn draw_shadow_pass(
+    target: &ID2D1DeviceContext,
+    mask: &ID2D1CommandList,
+    sigma: f32,
+    alpha: f32,
+    offset_y: f32,
+) -> Result<()> {
+    let shadow = unsafe { target.CreateEffect(&CLSID_D2D1Shadow)? };
+    let shadow_color = [0.0_f32, 0.0, 0.0, alpha];
+    let offset = Vector2 { X: 0.0, Y: offset_y };
+    unsafe {
+        shadow.SetValue(
+            D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32,
+            D2D1_PROPERTY_TYPE_FLOAT,
+            bytes_of(&sigma),
+        )?;
+        shadow.SetValue(
+            D2D1_SHADOW_PROP_COLOR.0 as u32,
+            D2D1_PROPERTY_TYPE_VECTOR4,
+            bytes_of(&shadow_color),
+        )?;
+        shadow.SetInput(0, mask, true);
+        let output = shadow.GetOutput()?;
+        target.DrawImage(
+            &output,
+            Some(&offset),
+            None,
+            D2D1_INTERPOLATION_MODE_LINEAR,
+            D2D1_COMPOSITE_MODE_SOURCE_OVER,
+        );
+    }
+    Ok(())
+}
+
 fn draw_surface_backdrop(
     target: &ID2D1DeviceContext,
-    background: &windows::Win32::Graphics::Direct2D::ID2D1CommandList,
+    background: &ID2D1CommandList,
     surface: &D2D1_ROUNDED_RECT,
+    theme: Theme,
 ) -> Result<()> {
     let blur = unsafe { target.CreateEffect(&CLSID_D2D1GaussianBlur)? };
     let saturation = unsafe { target.CreateEffect(&CLSID_D2D1Saturation)? };
-    let sigma = 16.0_f32;
-    let saturation_amount = 1.16_f32;
+    let sigma = 20.0_f32;
+    let saturation_amount = 1.18_f32;
     let factory = unsafe { target.GetFactory()? };
     let geometry: ID2D1Geometry =
         unsafe { factory.CreateRoundedRectangleGeometry(surface)?.cast()? };
@@ -939,7 +1022,7 @@ fn draw_surface_backdrop(
         geometricMask: ManuallyDrop::new(Some(geometry)),
         maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
         maskTransform: Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0 },
-        opacity: 1.0,
+        opacity: if theme.dark { 0.76 } else { 0.66 },
         opacityBrush: ManuallyDrop::new(None),
         layerOptions: D2D1_LAYER_OPTIONS1_NONE,
     };

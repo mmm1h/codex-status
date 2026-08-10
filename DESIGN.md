@@ -155,7 +155,7 @@ The flyout is a fixed 420 × 412 logical-pixel native surface that scales per mo
 
 ## Elevation & Depth
 
-Depth comes from Acrylic blur, one transparent tonal layer, a quiet optical keyline, and broad Gaussian-blurred Aurora light. The inner information surface has no drop shadow. This avoids stacked glass-on-glass fog while keeping the desktop context visible.
+Depth comes from Acrylic blur, one highly transparent tonal layer, a refractive optical keyline, broad Gaussian-blurred Aurora light, and a two-stage native shadow. The inner information surface floats above the Acrylic base with a wide ambient shadow plus a short contact shadow; both remain neutral and preserve desktop context.
 
 **The Black-Glass Rule.** Dark surfaces must remain visibly black; increasing translucency must never be simulated by adding a milky grey veil.
 
@@ -175,8 +175,8 @@ The information surface uses 16px corners, the refresh control uses 11px corners
 
 - **Corner Style:** Soft native surface corners (16px).
 - **Background:** Theme-specific transparent glass with a subtle diagonal sheen.
-- **Shadow Strategy:** No nested surface shadow; separation comes from tonal contrast and one optical keyline.
-- **Border:** A quiet white optical edge, stronger in light mode and restrained in dark mode.
+- **Shadow Strategy:** One wide ambient shadow and one short downward contact shadow establish visible elevation without turning the surface opaque.
+- **Border:** A refractive white optical edge, stronger in light mode and restrained in dark mode.
 
 ### Capacity Gauge
 
