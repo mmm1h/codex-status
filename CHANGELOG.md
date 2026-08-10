@@ -2,6 +2,14 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.8.0] - 2026-08-10
+
+- Redesign the native flyout around the approved Current / Native Aurora Lite direction: one integrated transparent information surface over a restrained cyan, rose, and apricot Acrylic base.
+- Put weekly quota and reset timing into a balanced two-column hero, with the neutral 68px quota value remaining the clearest object in both light and dark themes.
+- Give the information surface a genuinely blurred and saturated backdrop, a thin optical keyline, and a two-stage native shadow so it separates from the base without becoming an opaque grey card.
+- Refine the 8px capacity gauge with a low-difference semantic gradient, quiet track, and inset highlight while keeping the percentage glyphs free of glow or gradient effects.
+- Preserve native high-contrast, disabled-transparency, Remote Desktop, graphics-failure, and GDI fallback paths while matching the new layout and typography as closely as those modes allow.
+
 ## [0.7.1] - 2026-07-28
 
 - Let a portable build update itself when it runs under the name it was downloaded with, such as `CodexStatus-v0.7.0-windows-x64-portable.exe`, instead of only as `CodexStatus.exe`.
