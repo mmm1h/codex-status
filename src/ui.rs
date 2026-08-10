@@ -6,8 +6,8 @@ use std::mem::size_of;
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-    DwmSetWindowAttribute,
+    DWMWA_BORDER_COLOR, DWMWA_COLOR_DEFAULT, DWMWA_COLOR_NONE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap,
@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Gdi::{
     DEFAULT_PITCH, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC,
     DeleteObject, DrawTextW, EndPaint, FF_SWISS, FONT_QUALITY, FW_NORMAL, FW_SEMIBOLD, FillRect,
     FillRgn, GetTextExtentPoint32W, HDC, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-    SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    SRCCOPY, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT,
 };
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -30,11 +30,13 @@ mod backdrop;
 mod direct2d;
 
 pub const CARD_WIDTH: i32 = 420;
+pub const FLYOUT_CORNER_RADIUS: i32 = 20;
 pub const HEADER_HEIGHT: i32 = 52;
 pub const FACTS_TOP: i32 = 304;
 pub const SURFACE_BOTTOM: i32 = 380;
 pub const FOOTER_HEIGHT: i32 = 32;
 pub const CARD_HEIGHT: i32 = SURFACE_BOTTOM + FOOTER_HEIGHT;
+const HEADER_BRAND: &str = "Codex";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RefreshButtonState {
@@ -171,6 +173,7 @@ pub fn configure_flyout(hwnd: HWND, theme: Theme) {
     unsafe {
         let dark = i32::from(theme.dark);
         let corner = DWMWCP_ROUND;
+        let border_color = if theme.high_contrast { DWMWA_COLOR_DEFAULT } else { DWMWA_COLOR_NONE };
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -183,8 +186,45 @@ pub fn configure_flyout(hwnd: HWND, theme: Theme) {
             (&corner as *const windows::Win32::Graphics::Dwm::DWM_WINDOW_CORNER_PREFERENCE).cast(),
             size_of_val(&corner) as u32,
         );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            (&border_color as *const u32).cast(),
+            size_of::<u32>() as u32,
+        );
     }
+    update_flyout_region(hwnd);
     backdrop::configure(hwnd, theme);
+}
+
+pub fn update_flyout_region(hwnd: HWND) {
+    unsafe {
+        let mut bounds = RECT::default();
+        if GetClientRect(hwnd, &mut bounds).is_err()
+            || bounds.right <= bounds.left
+            || bounds.bottom <= bounds.top
+        {
+            return;
+        }
+        let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96);
+        let diameter = flyout_region_diameter(dpi);
+        let region = CreateRoundRectRgn(
+            bounds.left,
+            bounds.top,
+            bounds.right + 1,
+            bounds.bottom + 1,
+            diameter,
+            diameter,
+        );
+        // SetWindowRgn owns the region after success; retain ownership only on failure.
+        if SetWindowRgn(hwnd, Some(region), true) == 0 {
+            let _ = DeleteObject(HGDIOBJ(region.0));
+        }
+    }
+}
+
+fn flyout_region_diameter(dpi: u32) -> i32 {
+    scale(FLYOUT_CORNER_RADIUS.saturating_mul(2), dpi).max(1)
 }
 
 pub fn show_fatal_error(message: &str) {
@@ -409,7 +449,7 @@ unsafe fn draw_card(
         draw_text(
             hdc,
             locale,
-            "CodexStatus",
+            HEADER_BRAND,
             RECT {
                 left: scale(39, dpi),
                 top: scale(8, dpi),
@@ -1470,6 +1510,9 @@ mod tests {
     #[test]
     fn compact_bands_preserve_main_surface_proportions() {
         assert_eq!(CARD_HEIGHT, 412);
+        assert_eq!(FLYOUT_CORNER_RADIUS, 20);
+        assert_eq!(flyout_region_diameter(96), 40);
+        assert_eq!(flyout_region_diameter(144), 60);
         assert_eq!(HEADER_HEIGHT, 52);
         assert_eq!(FOOTER_HEIGHT, 32);
         assert_eq!(SURFACE_BOTTOM - HEADER_HEIGHT, 328);

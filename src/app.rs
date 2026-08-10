@@ -944,6 +944,7 @@ unsafe extern "system" fn flyout_window_proc(
                     suggested.bottom - suggested.top,
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
+                ui::update_flyout_region(hwnd);
                 // The next paint releases the old back-buffer bitmap, resizes
                 // the physical-pixel swapchain, and reapplies the new D2D DPI.
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1965,6 +1966,7 @@ impl AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = KillTimer(Some(self.hwnd), TIMER_RENDERER_RELEASE);
             let _ = SetWindowPos(self.flyout, None, x, y, width, height, SWP_SHOWWINDOW);
+            ui::update_flyout_region(self.flyout);
             let _ = SetForegroundWindow(self.flyout);
             let _ = SetTimer(Some(self.hwnd), TIMER_CARD, 30_000, None);
             let _ = InvalidateRect(Some(self.flyout), None, false);

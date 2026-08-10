@@ -2,6 +2,12 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.8.1] - 2026-08-10
+
+- Match the approved design with an exact 20px DPI-scaled outer window region instead of relying only on Windows' smaller default corner treatment; reapply it after flyout sizing and per-monitor DPI changes.
+- Replace the grey DWM frame with the design's theme-aware one-pixel optical keyline while preserving the 16px information-surface corners.
+- Shorten the visible header brand from `CodexStatus` to `Codex` in both the Direct2D renderer and the GDI fallback.
+
 ## [0.8.0] - 2026-08-10
 
 - Redesign the native flyout around the approved Current / Native Aurora Lite direction: one integrated transparent information surface over a restrained cyan, rose, and apricot Acrylic base.

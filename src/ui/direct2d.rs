@@ -7,8 +7,8 @@
 //! FORM: approved Operate-mode single-surface composition; status color stays semantic.
 
 use super::{
-    Locale, RefreshButtonState, Theme, accent_for, accent_red, credit_expiry_text, footer_primary,
-    pace_label, plan_label, refresh_button_fill, reset_details, rgb, updated_text,
+    HEADER_BRAND, Locale, RefreshButtonState, Theme, accent_for, accent_red, credit_expiry_text,
+    footer_primary, pace_label, plan_label, refresh_button_fill, reset_details, rgb, updated_text,
 };
 use crate::insights::analyze_window;
 use crate::model::DisplayState;
@@ -840,6 +840,14 @@ fn draw_background_layer(
     )?;
     unsafe {
         target.FillRectangle(&rect(0.0, 0.0, 420.0, 412.0), &glass_sheen);
+        let outer_keyline =
+            solid_brush_alpha(target, rgb(255, 255, 255), if theme.dark { 0.11 } else { 0.72 })?;
+        target.DrawRoundedRectangle(
+            &rounded_rect(0.5, 0.5, 419.5, 411.5, 19.5),
+            &outer_keyline,
+            1.0,
+            None::<&ID2D1StrokeStyle>,
+        );
         target.SetTarget(&original);
         material.Close()?;
         target.DrawImage(
@@ -1088,7 +1096,7 @@ fn draw_header_content(
         target.FillEllipse(&ellipse(22.0, 30.0, 3.5), &brushes.accent);
         draw_text(
             target,
-            "CodexStatus",
+            HEADER_BRAND,
             rect(34.0, 12.0, 180.0, 48.0),
             &formats.header,
             &brushes.text,
