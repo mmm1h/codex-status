@@ -1,8 +1,9 @@
 //! Direct2D/DirectWrite renderer for the CodexStatus flyout.
 //!
-//! The visual hierarchy is intentionally quiet: one raised quota surface, one
-//! sunken fact strip, restrained status color, and a neutral tool button. The
-//! D3D11/D2D/DComp device and fallback contracts remain independent of styling.
+//! The visual hierarchy is intentionally quiet: neutral hero typography floats
+//! above translucent Liquid Aurora surfaces while status color stays confined
+//! to the percent mark, capacity gauge, and small status cues. The D3D11/D2D/
+//! DComp device and fallback contracts remain independent of styling.
 
 use super::{
     Locale, RefreshButtonState, Theme, accent_for, accent_red, credit_expiry_text, footer_primary,
@@ -20,17 +21,17 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    CLSID_D2D1GaussianBlur, CLSID_D2D1Shadow, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
-    D2D1_COLOR_SPACE_SRGB, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_INTERPOLATION_MODE_LINEAR,
+    CLSID_D2D1Shadow, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
+    D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT, D2D1_COLOR_SPACE_SRGB,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_VECTOR4,
-    D2D1_ROUNDED_RECT, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
+    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+    D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap1, ID2D1Brush,
     ID2D1CommandList, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1Image,
-    ID2D1LinearGradientBrush, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    ID2D1LinearGradientBrush, ID2D1RadialGradientBrush, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
@@ -686,7 +687,6 @@ struct Brushes {
     line: ID2D1SolidColorBrush,
     track: ID2D1SolidColorBrush,
     accent: ID2D1SolidColorBrush,
-    accent_glow_soft: ID2D1SolidColorBrush,
     error: ID2D1SolidColorBrush,
     footer_primary: ID2D1SolidColorBrush,
 }
@@ -695,18 +695,12 @@ impl Brushes {
     fn new(target: &ID2D1DeviceContext, state: &DisplayState, theme: Theme) -> Result<Self> {
         let accent = accent_for(state, theme);
         let error = if theme.high_contrast { theme.text } else { accent_red(theme) };
-        let glow_allowed = theme.dark && !theme.high_contrast;
         Ok(Self {
             text: solid_brush(target, theme.text)?,
             muted: solid_brush(target, theme.muted)?,
             line: solid_brush(target, theme.line)?,
             track: solid_brush(target, theme.line)?,
             accent: solid_brush(target, accent)?,
-            accent_glow_soft: solid_brush_alpha(
-                target,
-                accent,
-                if glow_allowed { 0.08 } else { 0.0 },
-            )?,
             error: solid_brush(target, error)?,
             footer_primary: solid_brush(
                 target,
@@ -736,7 +730,6 @@ fn draw_frame(
     glass_enabled: bool,
 ) -> Result<()> {
     let brushes = Brushes::new(target, state, theme)?;
-    let accent = accent_for(state, theme);
     draw_background_layer(target, theme, glass_enabled)?;
 
     draw_surface_layer(target, &brushes, theme)?;
@@ -752,7 +745,7 @@ fn draw_frame(
         refreshing,
         refresh_angle_degrees,
     )?;
-    draw_hero_content(target, dwrite, formats, &brushes, state, locale, theme, accent)?;
+    draw_hero_content(target, dwrite, formats, &brushes, state, locale, theme)?;
     draw_metrics_content(target, dwrite, formats, &brushes, state, locale)?;
     draw_footer_content(target, dwrite, formats, &brushes, state, locale)?;
     Ok(())
@@ -773,14 +766,11 @@ fn draw_background_layer(
     if theme.high_contrast {
         return Ok(());
     }
-    let (start, end, alpha) = if glass_enabled {
-        if theme.dark {
-            (rgb(25, 28, 31), theme.background, 0.42)
-        } else {
-            (rgb(240, 244, 248), theme.background, 0.46)
-        }
-    } else {
-        (if theme.dark { rgb(25, 28, 31) } else { rgb(240, 244, 248) }, theme.background, 1.0)
+    let (start, end, alpha) = match (theme.dark, glass_enabled) {
+        (true, true) => (rgb(20, 25, 30), rgb(5, 8, 12), 0.62),
+        (false, true) => (rgb(249, 251, 253), rgb(229, 234, 241), 0.48),
+        (true, false) => (rgb(20, 25, 30), rgb(5, 8, 12), 1.0),
+        (false, false) => (rgb(249, 251, 253), rgb(229, 234, 241), 1.0),
     };
     let background = linear_gradient_alpha(
         target,
@@ -793,47 +783,134 @@ fn draw_background_layer(
     unsafe {
         target.FillRectangle(&rect(0.0, 0.0, 420.0, 412.0), &background);
     }
+
+    // Large, soft color volumes live behind the glass instead of on text or
+    // component borders. Dark mode intentionally keeps them low-luminance so
+    // the material reads as black glass rather than grey fog.
+    let aurora_alpha = |light: f32, dark: f32| if theme.dark { dark } else { light };
+    let aurora_pools = [
+        radial_gradient(
+            target,
+            Vector2 { X: -8.0, Y: 82.0 },
+            245.0,
+            218.0,
+            rgb(76, 211, 207),
+            aurora_alpha(0.25, 0.19),
+        )?,
+        radial_gradient(
+            target,
+            Vector2 { X: 430.0, Y: 108.0 },
+            238.0,
+            222.0,
+            rgb(232, 103, 153),
+            aurora_alpha(0.22, 0.14),
+        )?,
+        radial_gradient(
+            target,
+            Vector2 { X: 330.0, Y: 420.0 },
+            292.0,
+            214.0,
+            rgb(235, 151, 79),
+            aurora_alpha(0.22, 0.13),
+        )?,
+        radial_gradient(
+            target,
+            Vector2 { X: 190.0, Y: 220.0 },
+            220.0,
+            188.0,
+            rgb(139, 102, 192),
+            aurora_alpha(0.085, 0.045),
+        )?,
+    ];
+    unsafe {
+        for pool in &aurora_pools {
+            target.FillRectangle(&rect(0.0, 0.0, 420.0, 412.0), pool);
+        }
+    }
+
+    let glass_sheen = linear_gradient_alpha_pair(
+        target,
+        rgb(255, 255, 255),
+        rgb(255, 255, 255),
+        if theme.dark { 0.075 } else { 0.20 },
+        0.0,
+        Vector2 { X: 34.0, Y: 0.0 },
+        Vector2 { X: 330.0, Y: 255.0 },
+    )?;
+    unsafe {
+        target.FillRectangle(&rect(0.0, 0.0, 420.0, 412.0), &glass_sheen);
+    }
     Ok(())
 }
 
 fn draw_surface_layer(target: &ID2D1DeviceContext, brushes: &Brushes, theme: Theme) -> Result<()> {
-    let hero = rounded_rect(16.0, 52.0, 404.0, 380.0, 8.0);
+    let hero = rounded_rect(16.0, 52.0, 404.0, 300.0, 12.0);
+    let hero_top = if theme.dark { rgb(12, 16, 21) } else { rgb(255, 255, 255) };
+    let hero_bottom = if theme.dark { rgb(4, 7, 11) } else { rgb(244, 248, 252) };
     let hero_gradient = linear_gradient_alpha_pair(
         target,
-        theme.surface,
-        theme.surface,
+        hero_top,
+        hero_bottom,
         if theme.high_contrast {
             1.0
         } else if theme.dark {
-            0.90
+            0.74
         } else {
-            0.92
+            0.62
         },
         if theme.high_contrast {
             1.0
         } else if theme.dark {
-            0.82
+            0.68
         } else {
-            0.84
+            0.48
         },
         Vector2 { X: 20.0, Y: 56.0 },
-        Vector2 { X: 398.0, Y: 364.0 },
+        Vector2 { X: 398.0, Y: 296.0 },
     )?;
-    let facts = rounded_rect(16.0, 304.0, 404.0, 380.0, 8.0);
-    let fact_brush = solid_brush_alpha(
+    let material_sheen = linear_gradient_alpha_pair(
         target,
-        theme.surface_alt,
+        rgb(255, 255, 255),
+        rgb(255, 255, 255),
+        if theme.high_contrast {
+            0.0
+        } else if theme.dark {
+            0.07
+        } else {
+            0.24
+        },
+        0.0,
+        Vector2 { X: 28.0, Y: 62.0 },
+        Vector2 { X: 344.0, Y: 244.0 },
+    )?;
+    let facts = rounded_rect(16.0, 304.0, 404.0, 380.0, 12.0);
+    let facts_top = if theme.dark { rgb(10, 14, 18) } else { rgb(255, 255, 255) };
+    let facts_bottom = if theme.dark { rgb(4, 7, 10) } else { rgb(245, 248, 251) };
+    let fact_brush = linear_gradient_alpha_pair(
+        target,
+        facts_top,
+        facts_bottom,
         if theme.high_contrast {
             1.0
         } else if theme.dark {
-            0.96
+            0.72
         } else {
-            0.92
+            0.60
         },
+        if theme.high_contrast {
+            1.0
+        } else if theme.dark {
+            0.66
+        } else {
+            0.50
+        },
+        Vector2 { X: 16.0, Y: 304.0 },
+        Vector2 { X: 404.0, Y: 380.0 },
     )?;
     if !theme.high_contrast {
         let mask = record_mask(target, |context, brush| unsafe {
             context.FillRoundedRectangle(&hero, brush);
+            context.FillRoundedRectangle(&facts, brush);
         })?;
         let shadow = unsafe { target.CreateEffect(&CLSID_D2D1Shadow)? };
         let sigma = if theme.dark { 5.2_f32 } else { 4.6_f32 };
@@ -863,10 +940,47 @@ fn draw_surface_layer(target: &ID2D1DeviceContext, brushes: &Brushes, theme: The
     }
     unsafe {
         target.FillRoundedRectangle(&hero, &hero_gradient);
+        target.FillRoundedRectangle(&hero, &material_sheen);
         target.FillRoundedRectangle(&facts, &fact_brush);
         if theme.high_contrast {
             target.DrawRoundedRectangle(&hero, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
             target.DrawRoundedRectangle(&facts, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
+        } else {
+            let card_border = solid_brush_alpha(
+                target,
+                rgb(255, 255, 255),
+                if theme.dark { 0.105 } else { 0.62 },
+            )?;
+            let panel_highlight = solid_brush_alpha(
+                target,
+                rgb(255, 255, 255),
+                if theme.dark { 0.08 } else { 0.42 },
+            )?;
+            let inset_shadow =
+                solid_brush_alpha(target, rgb(8, 12, 16), if theme.dark { 0.24 } else { 0.08 })?;
+            target.DrawRoundedRectangle(&hero, &card_border, 1.0, None::<&ID2D1StrokeStyle>);
+            target.DrawRoundedRectangle(&facts, &card_border, 1.0, None::<&ID2D1StrokeStyle>);
+            target.DrawLine(
+                Vector2 { X: 30.0, Y: 52.75 },
+                Vector2 { X: 390.0, Y: 52.75 },
+                &panel_highlight,
+                0.75,
+                None::<&ID2D1StrokeStyle>,
+            );
+            target.DrawLine(
+                Vector2 { X: 28.0, Y: 304.5 },
+                Vector2 { X: 392.0, Y: 304.5 },
+                &panel_highlight,
+                0.65,
+                None::<&ID2D1StrokeStyle>,
+            );
+            target.DrawLine(
+                Vector2 { X: 30.0, Y: 299.25 },
+                Vector2 { X: 390.0, Y: 299.25 },
+                &inset_shadow,
+                0.75,
+                None::<&ID2D1StrokeStyle>,
+            );
         }
     }
     Ok(())
@@ -881,11 +995,28 @@ fn draw_glass_text_scrims(
         return Ok(());
     }
 
-    let scrim_color = if theme.dark { rgb(20, 22, 25) } else { rgb(237, 241, 245) };
-    let scrim = solid_brush_alpha(target, scrim_color, if theme.dark { 0.18 } else { 0.20 })?;
+    let scrim_color = if theme.dark { rgb(4, 7, 10) } else { rgb(249, 251, 253) };
+    let header_scrim = linear_gradient_alpha_pair(
+        target,
+        scrim_color,
+        scrim_color,
+        if theme.dark { 0.16 } else { 0.24 },
+        if theme.dark { 0.04 } else { 0.07 },
+        Vector2 { X: 0.0, Y: 0.0 },
+        Vector2 { X: 0.0, Y: 52.0 },
+    )?;
+    let footer_scrim = linear_gradient_alpha_pair(
+        target,
+        scrim_color,
+        scrim_color,
+        if theme.dark { 0.03 } else { 0.05 },
+        if theme.dark { 0.15 } else { 0.20 },
+        Vector2 { X: 0.0, Y: 380.0 },
+        Vector2 { X: 0.0, Y: 412.0 },
+    )?;
     unsafe {
-        target.FillRectangle(&rect(0.0, 0.0, 420.0, 52.0), &scrim);
-        target.FillRectangle(&rect(0.0, 380.0, 420.0, 412.0), &scrim);
+        target.FillRectangle(&rect(0.0, 0.0, 420.0, 52.0), &header_scrim);
+        target.FillRectangle(&rect(0.0, 380.0, 420.0, 412.0), &footer_scrim);
     }
     Ok(())
 }
@@ -903,16 +1034,22 @@ fn draw_header_content(
     refresh_angle_degrees: f32,
 ) -> Result<()> {
     let button_brush = solid_brush(target, refresh_button_fill(theme, button_state))?;
-    let button = rounded_rect(368.0, 8.0, 404.0, 44.0, 4.0);
+    let button = rounded_rect(368.0, 8.0, 404.0, 44.0, 9.0);
     unsafe {
         target.FillEllipse(&ellipse(24.0, 26.0, 5.0), &brushes.accent);
-        draw_text(target, "Codex", rect(39.0, 8.0, 106.0, 44.0), &formats.header, &brushes.text);
+        draw_text(
+            target,
+            "CodexStatus",
+            rect(39.0, 8.0, 164.0, 44.0),
+            &formats.header,
+            &brushes.text,
+        );
         draw_tabular_text(
             target,
             dwrite,
             formats,
             &updated_text(state, formats.locale),
-            rect(112.0, 8.0, 350.0, 44.0),
+            rect(170.0, 8.0, 350.0, 44.0),
             &formats.update,
             &brushes.muted,
         )?;
@@ -947,9 +1084,8 @@ fn draw_hero_content(
     state: &DisplayState,
     locale: Locale,
     theme: Theme,
-    accent_color: COLORREF,
 ) -> Result<()> {
-    draw_percentage(target, dwrite, formats, brushes, state.weekly_percent(), theme)?;
+    draw_percentage(target, dwrite, formats, brushes, state.weekly_percent())?;
     unsafe {
         draw_text(
             target,
@@ -1000,7 +1136,7 @@ fn draw_hero_content(
         )?;
     }
 
-    draw_quota_track(target, dwrite, formats, brushes, state, locale, theme, accent_color)?;
+    draw_quota_track(target, dwrite, formats, brushes, state, locale, theme)?;
     Ok(())
 }
 
@@ -1010,30 +1146,22 @@ fn draw_percentage(
     formats: &FormatSet,
     brushes: &Brushes,
     percent: Option<u8>,
-    theme: Theme,
 ) -> Result<()> {
     let number = percent.map_or_else(|| "--".to_owned(), |value| value.to_string());
     let text = if percent.is_some() { format!("{number}%") } else { number };
     let layout = percentage_layout(dwrite, formats, &text, percent.is_some())?;
-    let origin = Vector2 { X: 32.0, Y: 56.0 };
-    if percent.is_some() && theme.dark && !theme.high_contrast {
-        let mask = record_mask(target, |context, _| unsafe {
-            context.DrawTextLayout(
-                origin,
-                &layout,
-                &brushes.accent_glow_soft,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        })?;
-        draw_blurred_mask(target, &mask, 3.0)?;
+    if percent.is_some() {
+        let percent_range = DWRITE_TEXT_RANGE {
+            startPosition: text.encode_utf16().count().saturating_sub(1) as u32,
+            length: 1,
+        };
+        unsafe {
+            layout.SetDrawingEffect(&brushes.accent, percent_range)?;
+        }
     }
+    let origin = Vector2 { X: 32.0, Y: 56.0 };
     unsafe {
-        target.DrawTextLayout(
-            origin,
-            &layout,
-            if percent.is_some() { &brushes.accent } else { &brushes.text },
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-        );
+        target.DrawTextLayout(origin, &layout, &brushes.text, D2D1_DRAW_TEXT_OPTIONS_NONE);
     }
     Ok(())
 }
@@ -1072,31 +1200,59 @@ fn draw_quota_track(
     state: &DisplayState,
     locale: Locale,
     theme: Theme,
-    accent_color: COLORREF,
 ) -> Result<()> {
     let left = 32.0;
     let right = 388.0;
     let top = 169.0;
     let bottom = 177.0;
+    let track = if theme.high_contrast {
+        brushes.track.clone()
+    } else {
+        solid_brush_alpha(
+            target,
+            if theme.dark { rgb(255, 255, 255) } else { rgb(71, 82, 92) },
+            if theme.dark { 0.095 } else { 0.13 },
+        )?
+    };
     unsafe {
-        target.FillRoundedRectangle(&rounded_rect(left, top, right, bottom, 4.0), &brushes.track);
+        target.FillRoundedRectangle(&rounded_rect(left, top, right, bottom, 4.0), &track);
     }
 
     if let Some(value) = state.weekly_percent()
         && value > 0
     {
         let filled = (left + (right - left) * f32::from(value) / 100.0).clamp(left + 6.0, right);
-        let start_color =
-            mix_color(accent_color, theme.surface, if theme.dark { 0.12 } else { 0.20 });
-        let progress = linear_gradient(
+        let progress = capacity_gradient(
             target,
-            start_color,
-            accent_color,
+            theme,
+            value,
             Vector2 { X: left, Y: top },
             Vector2 { X: right, Y: top },
         )?;
         unsafe {
-            target.FillRoundedRectangle(&rounded_rect(left, top, filled, bottom, 4.0), &progress);
+            if theme.high_contrast {
+                target.FillRoundedRectangle(
+                    &rounded_rect(left, top, filled, bottom, 4.0),
+                    &brushes.accent,
+                );
+            } else {
+                target
+                    .FillRoundedRectangle(&rounded_rect(left, top, filled, bottom, 4.0), &progress);
+            }
+            if !theme.high_contrast && filled > left + 12.0 {
+                let progress_highlight = solid_brush_alpha(
+                    target,
+                    rgb(255, 255, 255),
+                    if theme.dark { 0.16 } else { 0.18 },
+                )?;
+                target.DrawLine(
+                    Vector2 { X: left + 4.0, Y: top + 1.15 },
+                    Vector2 { X: filled - 4.0, Y: top + 1.15 },
+                    &progress_highlight,
+                    0.65,
+                    None::<&ID2D1StrokeStyle>,
+                );
+            }
         }
     }
 
@@ -1367,31 +1523,6 @@ fn record_mask(
     }
 }
 
-fn draw_blurred_mask(
-    target: &ID2D1DeviceContext,
-    mask: &ID2D1CommandList,
-    sigma: f32,
-) -> Result<()> {
-    let blur = unsafe { target.CreateEffect(&CLSID_D2D1GaussianBlur)? };
-    unsafe {
-        blur.SetInput(0, mask, true);
-        blur.SetValue(
-            D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,
-            D2D1_PROPERTY_TYPE_FLOAT,
-            bytes_of(&sigma),
-        )?;
-        let output = blur.GetOutput()?;
-        target.DrawImage(
-            &output,
-            None,
-            None,
-            D2D1_INTERPOLATION_MODE_LINEAR,
-            D2D1_COMPOSITE_MODE_SOURCE_OVER,
-        );
-    }
-    Ok(())
-}
-
 fn draw_ring_arrow(
     target: &ID2D1DeviceContext,
     x: f32,
@@ -1451,31 +1582,6 @@ fn draw_ring_arrow(
     Ok(())
 }
 
-fn linear_gradient(
-    target: &ID2D1DeviceContext,
-    start_color: COLORREF,
-    end_color: COLORREF,
-    start: Vector2,
-    end: Vector2,
-) -> Result<ID2D1LinearGradientBrush> {
-    let stops = [
-        D2D1_GRADIENT_STOP { position: 0.0, color: color(start_color) },
-        D2D1_GRADIENT_STOP { position: 1.0, color: color(end_color) },
-    ];
-    unsafe {
-        let collection = target.CreateGradientStopCollection(
-            &stops,
-            D2D1_COLOR_SPACE_SRGB,
-            D2D1_COLOR_SPACE_SRGB,
-            D2D1_BUFFER_PRECISION_8BPC_UNORM,
-            D2D1_EXTEND_MODE_CLAMP,
-            D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
-        )?;
-        let properties = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: start, endPoint: end };
-        target.CreateLinearGradientBrush(&properties, None, &collection)
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn linear_gradient_alpha_pair(
     target: &ID2D1DeviceContext,
@@ -1530,6 +1636,82 @@ fn linear_gradient_alpha(
     }
 }
 
+fn radial_gradient(
+    target: &ID2D1DeviceContext,
+    center: Vector2,
+    radius_x: f32,
+    radius_y: f32,
+    tint: COLORREF,
+    alpha: f32,
+) -> Result<ID2D1RadialGradientBrush> {
+    let stops = [
+        D2D1_GRADIENT_STOP { position: 0.0, color: color_alpha(tint, alpha) },
+        D2D1_GRADIENT_STOP { position: 0.48, color: color_alpha(tint, alpha * 0.58) },
+        D2D1_GRADIENT_STOP { position: 1.0, color: color_alpha(tint, 0.0) },
+    ];
+    unsafe {
+        let collection = target.CreateGradientStopCollection(
+            &stops,
+            D2D1_COLOR_SPACE_SRGB,
+            D2D1_COLOR_SPACE_SRGB,
+            D2D1_BUFFER_PRECISION_8BPC_UNORM,
+            D2D1_EXTEND_MODE_CLAMP,
+            D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
+        )?;
+        let properties = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
+            center,
+            gradientOriginOffset: Vector2 { X: 0.0, Y: 0.0 },
+            radiusX: radius_x,
+            radiusY: radius_y,
+        };
+        target.CreateRadialGradientBrush(&properties, None, &collection)
+    }
+}
+
+fn capacity_gradient(
+    target: &ID2D1DeviceContext,
+    theme: Theme,
+    value: u8,
+    start: Vector2,
+    end: Vector2,
+) -> Result<ID2D1LinearGradientBrush> {
+    let colors = if value < 20 {
+        if theme.dark {
+            [rgb(235, 140, 149), rgb(226, 116, 127), rgb(215, 95, 106), rgb(208, 106, 115)]
+        } else {
+            [rgb(234, 124, 134), rgb(218, 99, 111), rgb(198, 78, 91), rgb(185, 75, 85)]
+        }
+    } else if value < 50 {
+        if theme.dark {
+            [rgb(239, 189, 104), rgb(224, 166, 75), rgb(208, 146, 55), rgb(197, 138, 50)]
+        } else {
+            [rgb(240, 180, 90), rgb(219, 146, 57), rgb(191, 121, 30), rgb(169, 107, 22)]
+        }
+    } else if theme.dark {
+        [rgb(75, 210, 191), rgb(37, 189, 157), rgb(16, 165, 129), rgb(11, 140, 112)]
+    } else {
+        [rgb(67, 205, 184), rgb(34, 181, 150), rgb(16, 163, 127), rgb(11, 144, 115)]
+    };
+    let stops = [
+        D2D1_GRADIENT_STOP { position: 0.0, color: color(colors[0]) },
+        D2D1_GRADIENT_STOP { position: 0.38, color: color(colors[1]) },
+        D2D1_GRADIENT_STOP { position: 0.70, color: color(colors[2]) },
+        D2D1_GRADIENT_STOP { position: 1.0, color: color(colors[3]) },
+    ];
+    unsafe {
+        let collection = target.CreateGradientStopCollection(
+            &stops,
+            D2D1_COLOR_SPACE_SRGB,
+            D2D1_COLOR_SPACE_SRGB,
+            D2D1_BUFFER_PRECISION_8BPC_UNORM,
+            D2D1_EXTEND_MODE_CLAMP,
+            D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
+        )?;
+        let properties = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: start, endPoint: end };
+        target.CreateLinearGradientBrush(&properties, None, &collection)
+    }
+}
+
 fn color(value: COLORREF) -> D2D1_COLOR_F {
     color_alpha(value, 1.0)
 }
@@ -1541,16 +1723,6 @@ fn color_alpha(value: COLORREF, alpha: f32) -> D2D1_COLOR_F {
         b: ((value.0 >> 16) & 0xff) as f32 / 255.0,
         a: alpha.clamp(0.0, 1.0),
     }
-}
-
-fn mix_color(from: COLORREF, to: COLORREF, amount: f32) -> COLORREF {
-    let amount = amount.clamp(0.0, 1.0);
-    let mix = |shift: u32| {
-        let from = ((from.0 >> shift) & 0xff) as f32;
-        let to = ((to.0 >> shift) & 0xff) as f32;
-        (from + (to - from) * amount).round().clamp(0.0, 255.0) as u8
-    };
-    rgb(mix(0), mix(8), mix(16))
 }
 
 fn bytes_of<T>(value: &T) -> &[u8] {
@@ -1584,15 +1756,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn color_mixing_keeps_channel_order() {
-        assert_eq!(mix_color(rgb(0, 0, 0), rgb(100, 150, 200), 0.5), rgb(50, 75, 100));
-    }
-
-    #[test]
     fn card_geometry_stays_inside_the_logical_surface() {
         for surface in [
-            rounded_rect(16.0, 52.0, 404.0, 380.0, 8.0),
-            rounded_rect(16.0, 304.0, 404.0, 380.0, 8.0),
+            rounded_rect(16.0, 52.0, 404.0, 300.0, 12.0),
+            rounded_rect(16.0, 304.0, 404.0, 380.0, 12.0),
         ] {
             assert!(surface.rect.left >= 0.0);
             assert!(surface.rect.right <= super::super::CARD_WIDTH as f32);

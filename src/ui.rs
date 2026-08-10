@@ -145,24 +145,24 @@ pub fn detect_theme(preference: &str) -> Theme {
             dark,
             tray_dark,
             high_contrast: false,
-            background: rgb(31, 34, 37),
-            surface: rgb(45, 48, 51),
-            surface_alt: rgb(36, 39, 42),
-            text: rgb(240, 243, 242),
-            muted: rgb(154, 161, 158),
-            line: rgb(72, 78, 76),
+            background: rgb(8, 11, 15),
+            surface: rgb(6, 9, 13),
+            surface_alt: rgb(10, 13, 17),
+            text: rgb(242, 245, 246),
+            muted: rgb(158, 166, 171),
+            line: rgb(50, 56, 62),
         }
     } else {
         Theme {
             dark,
             tray_dark,
             high_contrast: false,
-            background: rgb(229, 233, 239),
-            surface: rgb(247, 249, 251),
-            surface_alt: rgb(222, 228, 234),
-            text: rgb(32, 37, 43),
-            muted: rgb(102, 112, 122),
-            line: rgb(198, 207, 216),
+            background: rgb(232, 236, 242),
+            surface: rgb(246, 248, 251),
+            surface_alt: rgb(226, 232, 239),
+            text: rgb(32, 36, 41),
+            muted: rgb(109, 115, 124),
+            line: rgb(194, 203, 213),
         }
     }
 }
@@ -409,11 +409,11 @@ unsafe fn draw_card(
         draw_text(
             hdc,
             locale,
-            "Codex",
+            "CodexStatus",
             RECT {
                 left: scale(39, dpi),
                 top: scale(8, dpi),
-                right: scale(106, dpi),
+                right: scale(164, dpi),
                 bottom: scale(44, dpi),
             },
             scale(18, dpi),
@@ -426,7 +426,7 @@ unsafe fn draw_card(
             locale,
             &updated_text(state, locale),
             RECT {
-                left: scale(112, dpi),
+                left: scale(170, dpi),
                 top: scale(8, dpi),
                 right: scale(350, dpi),
                 bottom: scale(44, dpi),
@@ -441,12 +441,12 @@ unsafe fn draw_card(
             left: scale(16, dpi),
             top: scale(HEADER_HEIGHT, dpi),
             right: width - scale(16, dpi),
-            bottom: scale(SURFACE_BOTTOM, dpi),
+            bottom: scale(300, dpi),
         };
         if theme.high_contrast {
-            outlined_surface(hdc, hero, scale(8, dpi), theme.surface, theme.line, dpi);
+            outlined_surface(hdc, hero, scale(12, dpi), theme.surface, theme.line, dpi);
         } else {
-            fill_rounded(hdc, hero, scale(8, dpi), theme.surface);
+            fill_rounded(hdc, hero, scale(12, dpi), theme.surface);
         }
 
         draw_percentage(hdc, state.weekly_percent(), locale, theme, status_color, dpi);
@@ -589,9 +589,9 @@ unsafe fn draw_card(
             bottom: scale(SURFACE_BOTTOM, dpi),
         };
         if theme.high_contrast {
-            outlined_surface(hdc, metrics, scale(8, dpi), theme.surface_alt, theme.line, dpi);
+            outlined_surface(hdc, metrics, scale(12, dpi), theme.surface_alt, theme.line, dpi);
         } else {
-            fill_rounded(hdc, metrics, scale(8, dpi), theme.surface_alt);
+            fill_rounded(hdc, metrics, scale(12, dpi), theme.surface_alt);
         }
         if let Some(session) = session {
             metric_column(
@@ -682,9 +682,9 @@ unsafe fn draw_refresh_button(
         };
         let fill_color = refresh_button_fill(theme, state);
         if theme.high_contrast {
-            outlined_surface(hdc, rect, scale(4, dpi), fill_color, theme.line, dpi);
+            outlined_surface(hdc, rect, scale(9, dpi), fill_color, theme.line, dpi);
         } else {
-            fill_rounded(hdc, rect, scale(4, dpi), fill_color);
+            fill_rounded(hdc, rect, scale(9, dpi), fill_color);
         }
         draw_text(
             hdc,
@@ -762,7 +762,7 @@ unsafe fn draw_percentage(
             },
             scale(68, dpi),
             FW_SEMIBOLD.0 as i32,
-            accent,
+            theme.text,
         );
         let number_left = scale(32, dpi);
         let number_width =

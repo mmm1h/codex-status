@@ -35,7 +35,7 @@ CodexStatus starts with Windows, stays in the notification area, refreshes on a 
 
 - Product name: CodexStatus.
 - Interface copy is direct, compact, and available in English and Simplified Chinese.
-- The current redesign is explicitly bound to the user-provided Stitch/Gemini reference: soft luminous glass surfaces, a green quota glow, generous rounded panels, and strong numerical hierarchy.
+- The current redesign is bound to the user-approved Liquid Aurora direction: translucent black-or-clear glass, low-frequency cyan/rose/apricot color pools, generous rounded panels, a neutral hero number, and status color confined to small semantic cues.
 
 ## Evidence on Hand
 
