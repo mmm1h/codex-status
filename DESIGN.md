@@ -152,7 +152,7 @@ The palette combines graphite neutrals with three atmospheric color pools and on
 
 ## Layout
 
-The flyout is a fixed 420 × 412 logical-pixel native surface with exact 20px outer corners that scale per monitor DPI. The 36px refresh control and 18px Codex brand sit in the outer Acrylic header. One inset information surface runs from `(14, 58)` to `(406, 366)` with 16px corners. Its hero is a true two-column composition: weekly quota on the left and reset timing right-aligned on the right, followed by the 8px gauge, pace/status row, an internal separator, and the facts grid. Primary text aligns to x=32. The compact footer remains on the outer Acrylic.
+The flyout is a fixed 420 × 412 logical-pixel native surface with exact 20px outer corners that scale per monitor DPI. Its custom window region is the sole outer-shape authority and is applied after Acrylic configuration; DWM must not add a second corner mask. The 36px refresh control and 18px Codex brand sit in the outer Acrylic header. One inset information surface runs from `(14, 58)` to `(406, 366)` with 16px corners. Its hero is a true two-column composition: weekly quota on the left and reset timing right-aligned on the right, followed by the 8px gauge, pace/status row, an internal separator, and the facts grid. Primary text aligns to x=32. The compact footer remains on the outer Acrylic.
 
 ## Elevation & Depth
 
@@ -162,7 +162,7 @@ Depth comes from Acrylic blur, one highly transparent tonal layer, a refractive 
 
 ## Shapes
 
-The outer flyout uses exact 20px corners, the information surface uses 16px corners, the refresh control uses 11px corners, and the 8px capacity gauge uses a 4px full-pill radius. Borders are single-pixel optical separators and never carry the Aurora spectrum.
+The outer flyout uses one exact 20px custom region without an additional DWM rounding pass, the information surface uses 16px corners, the refresh control uses 11px corners, and the 8px capacity gauge uses a 4px full-pill radius. Borders are single-pixel optical separators and never carry the Aurora spectrum.
 
 ## Components
 

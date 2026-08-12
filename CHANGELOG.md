@@ -2,6 +2,11 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.8.2] - 2026-08-13
+
+- Remove the grey and white slivers around the Acrylic flyout by making its exact DPI-scaled 20px window region the only outer-corner mask, rather than layering Windows' differently sized DWM rounding over it.
+- Apply that authoritative region after the Acrylic policy so the DirectComposition content and backdrop share one silhouette across light and dark themes.
+
 ## [0.8.1] - 2026-08-10
 
 - Match the approved design with an exact 20px DPI-scaled outer window region instead of relying only on Windows' smaller default corner treatment; reapply it after flyout sizing and per-monitor DPI changes.

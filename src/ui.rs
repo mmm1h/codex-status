@@ -7,7 +7,7 @@ use windows::Win32::Foundation::{COLORREF, HWND, RECT};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_COLOR_DEFAULT, DWMWA_COLOR_NONE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap,
@@ -172,7 +172,11 @@ pub fn detect_theme(preference: &str) -> Theme {
 pub fn configure_flyout(hwnd: HWND, theme: Theme) {
     unsafe {
         let dark = i32::from(theme.dark);
-        let corner = DWMWCP_ROUND;
+        // SetWindowRgn owns the exact 20px flyout silhouette. Asking DWM to
+        // round the same HWND applies a second, system-sized corner mask to the
+        // DirectComposition visual while SWCA acrylic remains visible beneath
+        // it, which exposes grey/white wedges where the two curves disagree.
+        let corner = DWMWCP_DONOTROUND;
         let border_color = if theme.high_contrast { DWMWA_COLOR_DEFAULT } else { DWMWA_COLOR_NONE };
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -193,8 +197,10 @@ pub fn configure_flyout(hwnd: HWND, theme: Theme) {
             size_of::<u32>() as u32,
         );
     }
-    update_flyout_region(hwnd);
     backdrop::configure(hwnd, theme);
+    // Apply the one authoritative clip after the Acrylic policy, so every
+    // material and composition layer shares the same outer geometry.
+    update_flyout_region(hwnd);
 }
 
 pub fn update_flyout_region(hwnd: HWND) {
@@ -207,15 +213,8 @@ pub fn update_flyout_region(hwnd: HWND) {
             return;
         }
         let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96);
-        let diameter = flyout_region_diameter(dpi);
-        let region = CreateRoundRectRgn(
-            bounds.left,
-            bounds.top,
-            bounds.right + 1,
-            bounds.bottom + 1,
-            diameter,
-            diameter,
-        );
+        let (left, top, right, bottom, diameter) = flyout_region_geometry(bounds, dpi);
+        let region = CreateRoundRectRgn(left, top, right, bottom, diameter, diameter);
         // SetWindowRgn owns the region after success; retain ownership only on failure.
         if SetWindowRgn(hwnd, Some(region), true) == 0 {
             let _ = DeleteObject(HGDIOBJ(region.0));
@@ -225,6 +224,13 @@ pub fn update_flyout_region(hwnd: HWND) {
 
 fn flyout_region_diameter(dpi: u32) -> i32 {
     scale(FLYOUT_CORNER_RADIUS.saturating_mul(2), dpi).max(1)
+}
+
+fn flyout_region_geometry(bounds: RECT, dpi: u32) -> (i32, i32, i32, i32, i32) {
+    // CreateRoundRectRgn's realized bounding box ends one device pixel before
+    // its lower-right inputs. Compensate so GetWindowRgn still covers the full
+    // 420x412 client instead of leaving a transparent right/bottom seam.
+    (bounds.left, bounds.top, bounds.right + 1, bounds.bottom + 1, flyout_region_diameter(dpi))
 }
 
 pub fn show_fatal_error(message: &str) {
@@ -1513,6 +1519,10 @@ mod tests {
         assert_eq!(FLYOUT_CORNER_RADIUS, 20);
         assert_eq!(flyout_region_diameter(96), 40);
         assert_eq!(flyout_region_diameter(144), 60);
+        assert_eq!(
+            flyout_region_geometry(RECT { left: 0, top: 0, right: 420, bottom: 412 }, 96),
+            (0, 0, 421, 413, 40)
+        );
         assert_eq!(HEADER_HEIGHT, 52);
         assert_eq!(FOOTER_HEIGHT, 32);
         assert_eq!(SURFACE_BOTTOM - HEADER_HEIGHT, 328);
