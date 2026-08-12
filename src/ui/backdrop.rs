@@ -1,30 +1,9 @@
-//! Window backdrop policy for the flyout.
+//! Window transparency policy for the flyout.
 //!
-//! The acrylic path intentionally uses an undocumented Windows API. Every
-//! failure is treated as an expected capability failure and falls back to the
-//! existing opaque renderer.
-//!
-//! The documented `DWMWA_SYSTEMBACKDROP_TYPE` attribute is deliberately *not*
-//! used to produce the material, even though this flyout meets its documented
-//! requirements. A 41-case ablation on Windows 11 24H2 (build 26100) measured
-//! both `DWMSBT_TRANSIENTWINDOW` and `DWMSBT_MAINWINDOW` against a moving
-//! high-contrast backdrop: every window-style variant returned `S_OK` and then
-//! painted a constant flat colour, with a frame-to-frame pixel delta of exactly
-//! zero. Swapping only the backdrop mechanism to `SetWindowCompositionAttribute`
-//! produced genuine real-time sampling on the unchanged window. Style factors
-//! were ruled out individually — dropping `WS_EX_TOOLWINDOW`, `WS_EX_TOPMOST`,
-//! the owner, or `CS_DROPSHADOW`, adding `WS_EX_NOREDIRECTIONBITMAP`, keeping a
-//! real non-client frame via `WS_CAPTION | WS_THICKFRAME` plus `WM_NCCALCSIZE`,
-//! and bypassing DirectComposition all left the result unchanged.
-//!
-//! `AccentFlags` matters more than the tint: the value `2` that
-//! window-vibrancy passes for plain blur rendered nearly black here, so this
-//! module pins `0`. That same version split is why the crate is not used
-//! directly — on Windows 11 it routes to the documented attribute that fails
-//! above, so its Windows 10 branch would be the only reachable benefit.
-//!
-//! Re-run the ablation before switching to the documented attribute; do not
-//! assume a later Windows build fixed it.
+//! The live material is owned by the rounded Windows.UI.Composition tree in
+//! `composition.rs`. SWCA Acrylic is deliberately disabled here: it creates a
+//! rectangular redirection surface outside that tree and ignores the HWND
+//! region, which exposes grey blocks at the four corners.
 
 use super::Theme;
 use std::cell::Cell;
@@ -49,12 +28,6 @@ const PERSONALIZE_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\The
 // remove this behavior.
 const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_DISABLED: u32 = 0;
-const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
-
-// Verified on Windows 11 24H2. GradientColor is packed as
-// R | G << 8 | B << 16 | A << 24.
-const DARK_ACRYLIC_TINT: u32 = pack_gradient(8, 11, 15, 120);
-const LIGHT_ACRYLIC_TINT: u32 = pack_gradient(246, 248, 250, 72);
 
 #[repr(C)]
 struct AccentPolicy {
@@ -87,26 +60,12 @@ thread_local! {
 static SWCA: OnceLock<Option<SetWindowCompositionAttribute>> = OnceLock::new();
 
 pub(super) fn configure(hwnd: HWND, theme: Theme) -> bool {
-    // Clearing the official system backdrop is required before SWCA acrylic;
-    // it also prevents a stale DWM material from fighting the opaque fallback.
+    // Clear every HWND-owned material before the compositor tree is attached.
+    // The call also removes stale Acrylic left by an in-place app update.
     clear_official_backdrop(hwnd);
+    disable_accent(hwnd);
 
-    let policy_allows_glass = !theme.high_contrast && transparency_enabled() && !remote_session();
-    let glass_enabled = if policy_allows_glass {
-        apply_accent(
-            hwnd,
-            ACCENT_ENABLE_ACRYLICBLURBEHIND,
-            if theme.dark { DARK_ACRYLIC_TINT } else { LIGHT_ACRYLIC_TINT },
-        )
-    } else {
-        false
-    };
-
-    // A failed resolve/call is deliberately non-fatal: remove any prior accent
-    // when possible and let Direct2D/GDI paint the current opaque background.
-    if !glass_enabled {
-        disable_accent(hwnd);
-    }
+    let glass_enabled = !theme.high_contrast && transparency_enabled() && !remote_session();
     STATE.with(|state| state.set(Some(BackdropState { hwnd, glass_enabled })));
     glass_enabled
 }
@@ -179,19 +138,4 @@ fn resolve_swca() -> Option<SetWindowCompositionAttribute> {
         let proc: FARPROC = GetProcAddress(module, PCSTR(name.as_ptr().cast()));
         proc.map(|value| std::mem::transmute(value))
     })
-}
-
-const fn pack_gradient(r: u8, g: u8, b: u8, a: u8) -> u32 {
-    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | ((a as u32) << 24)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn gradient_color_uses_verified_channel_order() {
-        assert_eq!(pack_gradient(8, 11, 15, 120), DARK_ACRYLIC_TINT);
-        assert_eq!(pack_gradient(246, 248, 250, 72), LIGHT_ACRYLIC_TINT);
-    }
 }

@@ -27,6 +27,7 @@ use winreg::RegKey;
 use winreg::enums::HKEY_CURRENT_USER;
 
 mod backdrop;
+mod composition;
 mod direct2d;
 
 pub const CARD_WIDTH: i32 = 420;

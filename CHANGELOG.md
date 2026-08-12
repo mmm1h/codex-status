@@ -2,6 +2,12 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.8.3] - 2026-08-13
+
+- Replace the rectangular SWCA Acrylic redirection surface with a live `Windows.UI.Composition` backdrop brush and Gaussian blur inside the same visual tree as the Direct2D swapchain.
+- Apply one exact DPI-scaled 20px clip to that complete composition tree, so the sampled glass, Aurora material, and UI content end at the same four corners without grey blocks or edge overhang.
+- Disable the compositor backdrop when high contrast, disabled transparency effects, or Remote Desktop requires the opaque path, while retaining the existing GDI graphics fallback.
+
 ## [0.8.2] - 2026-08-13
 
 - Remove the grey and white slivers around the Acrylic flyout by making its exact DPI-scaled 20px window region the only outer-corner mask, rather than layering Windows' differently sized DWM rounding over it.

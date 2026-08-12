@@ -18,7 +18,7 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 
 - Weekly remaining quota drawn directly into the standard tray icon.
 - Transparent, theme-aware Segoe UI digits with a restrained green (≥50%), amber (20–49%), red (<20%), or muted status rule.
-- D3D11 + Direct2D/DirectWrite flyout composed through a premultiplied DirectComposition swapchain, with live Windows acrylic, grayscale-antialiased text, and light, dark, high-contrast, and per-monitor DPI support.
+- D3D11 + Direct2D/DirectWrite flyout composed through a premultiplied swapchain in one rounded `Windows.UI.Composition` desktop tree, with live backdrop blur, grayscale-antialiased text, and light, dark, high-contrast, and per-monitor DPI support.
 - Layered translucent glass cards with native Direct2D shadows and blur effects, whitespace-based grouping, vector refresh artwork, and locally scrimmed bare-glass text.
 - Free, Go, Plus, and Pro plan badges use CodexStatus's own shapes and tier dots—not official OpenAI artwork—and do not rely on color alone to communicate the tier.
 - System, light, and dark flyout themes selectable from the tray menu.
@@ -54,9 +54,9 @@ CodexStatus only calls the locally installed `codex app-server`. Each refresh pe
 
 ### Rendering and fallback
 
-The flyout renders through D3D11, an `ID2D1DeviceContext`, and a premultiplied DirectComposition swapchain. Its live background blur uses Windows acrylic through `user32!SetWindowCompositionAttribute` with `ACCENT_ENABLE_ACRYLICBLURBEHIND`; the documented `DWMWA_SYSTEMBACKDROP_TYPE` path was not used because testing on this flyout produced a fixed solid color rather than live blur. Card shadows use `CLSID_D2D1Shadow`, while the large-number glow and progress-endpoint halo use `CLSID_D2D1GaussianBlur`. Text uses grayscale antialiasing because ClearType can create colored fringes on premultiplied-alpha surfaces.
+The flyout renders through D3D11, an `ID2D1DeviceContext`, and a premultiplied composition swapchain. A `Windows.UI.Composition` desktop tree places a live `CompositionBackdropBrush` Gaussian blur behind that swapchain, then applies one DPI-scaled 20px rounded clip to the complete tree. This keeps the sampled material, Aurora paint, and UI content on the same silhouette instead of creating a separate rectangular Acrylic surface. Card shadows use `CLSID_D2D1Shadow`; Aurora softness and the live backdrop use Gaussian blur effects. Text uses grayscale antialiasing because ClearType can create colored fringes on premultiplied-alpha surfaces.
 
-High-contrast mode, disabled Windows transparency effects, a Remote Desktop session, or failure to resolve or call `SetWindowCompositionAttribute` switches the flyout to opaque rendering without removing functionality. D3D11, Direct2D, or DirectComposition initialization or drawing failures also fall back to opaque rendering and, if necessary, continue through the original GDI drawing path.
+High-contrast mode, disabled Windows transparency effects, or a Remote Desktop session hides the live backdrop and switches the flyout to opaque rendering without removing functionality. D3D11, Direct2D, or Windows composition initialization or drawing failures also fall back to opaque rendering and, if necessary, continue through the original GDI drawing path.
 
 ## Privacy
 

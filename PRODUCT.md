@@ -26,7 +26,7 @@ CodexStatus starts with Windows, stays in the notification area, refreshes on a 
 
 - Native Rust and Win32 application for Windows 10/11 x64.
 - Direct2D and DirectWrite may render the flyout; the notification icon remains a standard Win32 icon and GDI remains the rendering fallback.
-- The flyout may use a real system backdrop (Desktop Acrylic) and a D3D11-backed Direct2D device context with DirectComposition, so that translucency and blur are genuine rather than simulated. Every such path must degrade to an opaque surface under high contrast, disabled transparency effects, remote sessions, or initialization failure.
+- The flyout may use a real system-sampled backdrop and a D3D11-backed Direct2D device context inside one rounded Windows.UI.Composition tree, so that translucency and blur are genuine rather than simulated. Every such path must degrade to an opaque surface under high contrast, disabled transparency effects, remote sessions, or initialization failure.
 - No Electron, WebView, WinUI, WPF, resident web server, token storage, raw-response storage, or telemetry.
 - Preserve quota refresh, cache expiry, alert, theme, pin, shortcut, service-check, auto-update, single-instance, and Explorer-recovery behavior unless the user explicitly changes it.
 - Low idle CPU and memory usage remain product goals. For the current glass redesign the user has explicitly accepted the added graphics cost up front and deferred its optimization, so visual quality takes precedence while the effect is being built.
@@ -35,7 +35,7 @@ CodexStatus starts with Windows, stays in the notification area, refreshes on a 
 
 - Product name: CodexStatus.
 - Interface copy is direct, compact, and available in English and Simplified Chinese.
-- The current redesign is bound to the user-approved Native Aurora Lite direction: translucent black-or-clear Acrylic, one integrated information surface, low-frequency cyan/rose/apricot color pools, a neutral hero number, and status color confined to small semantic cues.
+- The current redesign is bound to the user-approved Native Aurora Lite direction: translucent black-or-clear sampled glass, one integrated information surface, low-frequency cyan/rose/apricot color pools, a neutral hero number, and status color confined to small semantic cues.
 
 ## Evidence on Hand
 

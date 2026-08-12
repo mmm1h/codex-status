@@ -18,7 +18,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 
 - 在标准系统托盘图标内直接绘制周剩余额度。
 - 透明背景、随任务栏明暗切换的 Segoe UI 数字；底部仅用一条细线标记绿色（≥50%）、琥珀色（20–49%）、红色（<20%）或缓存状态。
-- 使用 D3D11 + Direct2D/DirectWrite 绘制浮层，并通过预乘 alpha 的 DirectComposition 交换链合成；支持 Windows 实时亚克力、灰度抗锯齿文字、浅色/深色/高对比度和多显示器 DPI。
+- 使用 D3D11 + Direct2D/DirectWrite 绘制浮层，并把预乘 alpha 交换链放入一棵统一圆角裁剪的 `Windows.UI.Composition` 桌面合成树；支持实时背景模糊、灰度抗锯齿文字、浅色/深色/高对比度和多显示器 DPI。
 - 半透明玻璃卡片以原生 Direct2D 阴影和模糊效果分层，使用留白而非竖线分区，并配有矢量刷新图标和保障裸玻璃区域文字可读性的局部 scrim。
 - Free、Go、Plus、Pro 套餐徽章采用 CodexStatus 自己设计的形制与层级圆点，并非 OpenAI 官方素材，也不会只靠颜色传达等级。
 - 可从托盘菜单选择跟随系统、浅色或深色界面主题。
@@ -54,9 +54,9 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 
 ### 渲染与降级
 
-浮层通过 D3D11、`ID2D1DeviceContext` 和预乘 alpha 的 DirectComposition 交换链渲染。实时背景模糊通过 `user32!SetWindowCompositionAttribute` 的 `ACCENT_ENABLE_ACRYLICBLURBEHIND` 实现；没有采用官方的 `DWMWA_SYSTEMBACKDROP_TYPE`，因为该路径在此浮层上的实测结果是固定纯色而非实时模糊。卡片阴影使用 `CLSID_D2D1Shadow`，大数字辉光和进度条端点光晕使用 `CLSID_D2D1GaussianBlur`。文字采用灰度抗锯齿，以避免 ClearType 在预乘 alpha 表面产生彩边。
+浮层通过 D3D11、`ID2D1DeviceContext` 和预乘 alpha 的合成交换链渲染。`Windows.UI.Composition` 桌面合成树在交换链下方放置实时 `CompositionBackdropBrush` 高斯模糊，并对整棵合成树统一应用随 DPI 缩放的 20px 圆角裁剪；背景玻璃、Aurora 渐变和 UI 内容因此共用同一个轮廓，不再产生独立的矩形 Acrylic 底面。卡片阴影使用 `CLSID_D2D1Shadow`，Aurora 柔化和实时背景使用高斯模糊效果。文字采用灰度抗锯齿，以避免 ClearType 在预乘 alpha 表面产生彩边。
 
-在高对比度模式、系统“透明效果”关闭、远程桌面会话，以及 `SetWindowCompositionAttribute` 解析或调用失败时，浮层会退回不透明渲染，功能不受影响。D3D11、Direct2D 或 DirectComposition 初始化或绘制失败时也会退回不透明渲染，并在必要时继续降级到原有 GDI 绘制路径。
+在高对比度模式、系统“透明效果”关闭或远程桌面会话中，浮层会隐藏实时背景并退回不透明渲染，功能不受影响。D3D11、Direct2D 或 Windows 合成初始化、绘制失败时也会退回不透明渲染，并在必要时继续降级到原有 GDI 绘制路径。
 
 ## 隐私
 

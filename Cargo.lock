@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "codex-status"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "chrono",
  "embed-resource",
@@ -71,6 +71,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "windows",
+ "windows-core",
  "windows-numerics",
  "winreg 0.56.0",
 ]

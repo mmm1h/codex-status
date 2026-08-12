@@ -1,11 +1,12 @@
 //! Direct2D/DirectWrite renderer for the CodexStatus flyout.
 //!
 //! THESIS: Native Aurora Lite is one compact monitor surface, not a stack of glass cards.
-//! OWN-WORLD: clear/black Acrylic, one quiet content plane, blurred cyan/rose/apricot light.
+//! OWN-WORLD: clipped backdrop blur, one quiet content plane, blurred cyan/rose/apricot light.
 //! STORY: read remaining quota first, compare reset timing, then scan supporting facts.
 //! FIRST VIEWPORT: a 420×412 flyout with a two-column hero and one integrated facts row.
 //! FORM: approved Operate-mode single-surface composition; status color stays semantic.
 
+use super::composition::{DesktopComposition, WinRtApartment};
 use super::{
     HEADER_BRAND, Locale, RefreshButtonState, Theme, accent_for, accent_red, credit_expiry_text,
     footer_primary, pace_label, plan_label, refresh_button_fill, reset_details, rgb, updated_text,
@@ -41,9 +42,6 @@ use windows::Win32::Graphics::Direct3D::{
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-};
-use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
@@ -221,11 +219,13 @@ struct Renderer {
     font_family: PCWSTR,
     surface: Option<CompositionSurface>,
     formats: Option<FormatSet>,
+    _winrt_apartment: WinRtApartment,
 }
 
 impl Renderer {
     fn new() -> Result<Self> {
         unsafe {
+            let winrt_apartment = WinRtApartment::initialize()?;
             let d3d_device = create_d3d_device()?;
             let dxgi_device: IDXGIDevice = d3d_device.cast()?;
             let d2d_factory =
@@ -245,12 +245,18 @@ impl Renderer {
                 font_family,
                 surface: None,
                 formats: None,
+                _winrt_apartment: winrt_apartment,
             })
         }
     }
 
     fn paint(&mut self, input: &PaintInput<'_>) -> Result<()> {
         self.ensure_surface(input.hwnd, input.size.0, input.size.1, input.dpi)?;
+        self.surface
+            .as_ref()
+            .expect("surface initialized")
+            .composition
+            .set_glass_enabled(input.glass_enabled)?;
         self.ensure_formats(input.locale)?;
 
         let context = self.context.clone();
@@ -281,7 +287,6 @@ impl Renderer {
         let surface = self.surface.as_ref().expect("surface initialized");
         unsafe {
             surface.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
-            surface.dcomp_device.Commit()?;
         }
         Ok(())
     }
@@ -329,9 +334,7 @@ impl Renderer {
 struct CompositionSurface {
     hwnd: HWND,
     swap_chain: IDXGISwapChain1,
-    dcomp_device: IDCompositionDevice,
-    dcomp_target: IDCompositionTarget,
-    _visual: IDCompositionVisual,
+    composition: DesktopComposition,
     target_bitmap: Option<ID2D1Bitmap1>,
     pixel_size: D2D_SIZE_U,
     dpi: u32,
@@ -363,37 +366,22 @@ impl CompositionSurface {
                 Flags: 0,
             };
             let swap_chain = factory.CreateSwapChainForComposition(d3d_device, &desc, None)?;
-            let dcomp_device: IDCompositionDevice = DCompositionCreateDevice(dxgi_device)?;
-            let dcomp_target = dcomp_device.CreateTargetForHwnd(hwnd, true)?;
-            let visual = dcomp_device.CreateVisual()?;
             let target_bitmap = create_target_bitmap(context, &swap_chain, dpi)?;
+            let composition = DesktopComposition::new(
+                hwnd,
+                &swap_chain,
+                pixel_size.width,
+                pixel_size.height,
+                dpi,
+            )?;
 
-            // Attach only after every back-buffer-dependent object exists. If
-            // an earlier step fails, no transparent composition root can cover
-            // the HWND and the caller can immediately use GDI.
-            visual.SetContent(&swap_chain)?;
-            dcomp_target.SetRoot(&visual)?;
-            if let Err(error) = dcomp_device.Commit() {
-                let detach_result = dcomp_target
-                    .SetRoot(None::<&IDCompositionVisual>)
-                    .and_then(|()| dcomp_device.Commit());
-                if let Err(detach_error) = detach_result {
-                    // Returning drops the uncommitted device, target, visual,
-                    // and swapchain together. Record the secondary failure
-                    // instead of silently pretending the root was removed.
-                    diagnostic_failure("initial composition detach", &detach_error);
-                }
-                return Err(error);
-            }
             context.SetTarget(&target_bitmap);
             context.SetDpi(dpi as f32, dpi as f32);
 
             Ok(Self {
                 hwnd,
                 swap_chain,
-                dcomp_device,
-                dcomp_target,
-                _visual: visual,
+                composition,
                 target_bitmap: Some(target_bitmap),
                 pixel_size,
                 dpi,
@@ -428,6 +416,7 @@ impl CompositionSurface {
             context.SetTarget(&target_bitmap);
             context.SetDpi(dpi as f32, dpi as f32);
             self.target_bitmap = Some(target_bitmap);
+            self.composition.resize(pixel_size.width, pixel_size.height, dpi)?;
             self.pixel_size = pixel_size;
             self.dpi = dpi;
         }
@@ -435,14 +424,7 @@ impl CompositionSurface {
     }
 
     fn detach(self) -> Result<()> {
-        unsafe {
-            // Detach and commit before dropping the swapchain so GDI can own
-            // the HWND; ui.rs schedules a follow-up frame when the first
-            // WM_PAINT cannot expose the redirected GDI surface yet.
-            self.dcomp_target.SetRoot(None::<&IDCompositionVisual>)?;
-            self.dcomp_device.Commit()?;
-        }
-        Ok(())
+        self.composition.detach()
     }
 }
 
