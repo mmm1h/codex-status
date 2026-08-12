@@ -2,6 +2,11 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.8.5] - 2026-08-13
+
+- Remove the binary `SetWindowRgn` mask from the normal composition path so the shared 20px clip retains per-pixel alpha coverage and smooth antialiasing, especially against dark desktops.
+- Restore the exact DPI-scaled window region only for the opaque GDI fallback, keeping compatibility without degrading the live glass silhouette.
+
 ## [0.8.4] - 2026-08-13
 
 - Fix update downloads that failed with WinHTTP error `0x80072F78` while GitHub redirected release URLs to its asset CDN.

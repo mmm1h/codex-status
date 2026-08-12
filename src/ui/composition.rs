@@ -1,9 +1,9 @@
 //! Rounded desktop composition tree for the flyout.
 //!
-//! SWCA Acrylic creates a separate rectangular redirection surface that does
-//! not honor `SetWindowRgn`. The compositor-owned backdrop and swap-chain
-//! visuals below share one rounded root clip, so the sampled material and the
-//! painted UI always have the same silhouette.
+//! SWCA Acrylic creates a separate rectangular redirection surface outside the
+//! compositor tree. The compositor-owned backdrop and swap-chain visuals below
+//! instead share one antialiased rounded root clip, which is also the normal
+//! path's only visible silhouette. A binary window region is reserved for GDI.
 
 use std::sync::Mutex;
 use windows::Foundation::{IPropertyValue, PropertyValue};

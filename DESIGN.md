@@ -152,7 +152,7 @@ The palette combines graphite neutrals with three atmospheric color pools and on
 
 ## Layout
 
-The flyout is a fixed 420 × 412 logical-pixel native surface with exact 20px outer corners that scale per monitor DPI. The window region and the single composition-root clip use the same geometry; DWM must not add another corner mask, and no backdrop may exist outside that clipped tree. The 36px refresh control and 18px Codex brand sit in the outer glass header. One inset information surface runs from `(14, 58)` to `(406, 366)` with 16px corners. Its hero is a true two-column composition: weekly quota on the left and reset timing right-aligned on the right, followed by the 8px gauge, pace/status row, an internal separator, and the facts grid. Primary text aligns to x=32. The compact footer remains on the outer glass.
+The flyout is a fixed 420 × 412 logical-pixel native surface with exact 20px outer corners that scale per monitor DPI. One composition-root alpha-coverage clip is the authoritative visible silhouette; the normal path must not apply a binary window region or another DWM corner mask, and no backdrop may exist outside that clipped tree. An exact DPI-scaled region is permitted only for the opaque GDI fallback. The 36px refresh control and 18px Codex brand sit in the outer glass header. One inset information surface runs from `(14, 58)` to `(406, 366)` with 16px corners. Its hero is a true two-column composition: weekly quota on the left and reset timing right-aligned on the right, followed by the 8px gauge, pace/status row, an internal separator, and the facts grid. Primary text aligns to x=32. The compact footer remains on the outer glass.
 
 ## Elevation & Depth
 
@@ -162,7 +162,7 @@ Depth comes from a live CompositionBackdropBrush Gaussian blur, one highly trans
 
 ## Shapes
 
-The outer flyout uses one exact 20px geometry shared by the custom window region and the complete composition-tree clip, without an additional DWM rounding pass. The information surface uses 16px corners, the refresh control uses 11px corners, and the 8px capacity gauge uses a 4px full-pill radius. Borders are single-pixel optical separators and never carry the Aurora spectrum.
+The outer flyout uses one exact 20px composition-tree clip with antialiased alpha coverage and no normal-path custom window region or additional DWM rounding pass. The opaque GDI fallback may reproduce that geometry with a binary region because it cannot emit premultiplied composition pixels. The information surface uses 16px corners, the refresh control uses 11px corners, and the 8px capacity gauge uses a 4px full-pill radius. Borders are single-pixel optical separators and never carry the Aurora spectrum.
 
 ## Components
 

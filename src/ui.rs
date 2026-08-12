@@ -173,10 +173,9 @@ pub fn detect_theme(preference: &str) -> Theme {
 pub fn configure_flyout(hwnd: HWND, theme: Theme) {
     unsafe {
         let dark = i32::from(theme.dark);
-        // SetWindowRgn owns the exact 20px flyout silhouette. Asking DWM to
-        // round the same HWND applies a second, system-sized corner mask to the
-        // DirectComposition visual while SWCA acrylic remains visible beneath
-        // it, which exposes grey/white wedges where the two curves disagree.
+        // The rounded Windows.UI.Composition clip owns the visible silhouette.
+        // DWM rounding would add a second system-sized curve and the legacy
+        // GDI window region is only restored if the compositor falls back.
         let corner = DWMWCP_DONOTROUND;
         let border_color = if theme.high_contrast { DWMWA_COLOR_DEFAULT } else { DWMWA_COLOR_NONE };
         let _ = DwmSetWindowAttribute(
@@ -199,12 +198,18 @@ pub fn configure_flyout(hwnd: HWND, theme: Theme) {
         );
     }
     backdrop::configure(hwnd, theme);
-    // Apply the one authoritative clip after the Acrylic policy, so every
-    // material and composition layer shares the same outer geometry.
-    update_flyout_region(hwnd);
+    clear_flyout_region(hwnd);
 }
 
-pub fn update_flyout_region(hwnd: HWND) {
+/// Removes the binary GDI region so the compositor's alpha-coverage clip can
+/// antialias the live material and content along one shared rounded outline.
+pub fn clear_flyout_region(hwnd: HWND) {
+    unsafe {
+        let _ = SetWindowRgn(hwnd, None, true);
+    }
+}
+
+fn apply_gdi_fallback_region(hwnd: HWND) {
     unsafe {
         let mut bounds = RECT::default();
         if GetClientRect(hwnd, &mut bounds).is_err()
@@ -372,6 +377,7 @@ pub fn paint_card(
                 // GDI cannot provide premultiplied composition content. Remove
                 // acrylic so the opaque fallback owns the first visible frame.
                 backdrop::disable_for_render_fallback(hwnd);
+                apply_gdi_fallback_region(hwnd);
             }
             let buffer = CreateCompatibleDC(Some(hdc));
             let bitmap = CreateCompatibleBitmap(hdc, width, height);
