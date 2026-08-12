@@ -2,6 +2,11 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.8.4] - 2026-08-13
+
+- Fix update downloads that failed with WinHTTP error `0x80072F78` while GitHub redirected release URLs to its asset CDN.
+- Resolve binaries through GitHub's stable Release Asset API, follow redirects explicitly only to the official release asset host, and retain the existing size, PE-header, and SHA-256 validation.
+
 ## [0.8.3] - 2026-08-13
 
 - Replace the rectangular SWCA Acrylic redirection surface with a live `Windows.UI.Composition` backdrop brush and Gaussian blur inside the same visual tree as the Direct2D swapchain.

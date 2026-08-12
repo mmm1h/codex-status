@@ -10,9 +10,11 @@ use std::ptr;
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows::Win32::Networking::WinHttp::{
     INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
-    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect,
-    WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable, WinHttpQueryHeaders,
-    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
+    WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_NEVER,
+    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
+    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable,
+    WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
+    WinHttpSetOption, WinHttpSetTimeouts,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_DELETE_ON_CLOSE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -23,9 +25,13 @@ use windows::Win32::System::Threading::{
 use windows::core::{PCWSTR, w};
 
 const RELEASE_API: &str = "https://api.github.com/repos/mmm1h/codex-status/releases/latest";
+const RELEASE_ASSET_API_PREFIX: &str =
+    "https://api.github.com/repos/mmm1h/codex-status/releases/assets/";
 const RELEASE_ASSET_PREFIX: &str = "https://github.com/mmm1h/codex-status/releases/download/";
 const MAX_METADATA_BYTES: usize = 512 * 1024;
 const MAX_EXECUTABLE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_REDIRECTS: usize = 2;
+const MAX_REDIRECT_LOCATION_UNITS: usize = 2_048;
 const UPDATE_WAIT_MS: u32 = 30_000;
 
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +72,7 @@ struct Release {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ReleaseAsset {
+    id: u64,
     name: String,
     browser_download_url: String,
     size: u64,
@@ -117,84 +124,134 @@ impl HttpClient {
     }
 
     fn get(&self, url: &str, accept: &str, limit: usize) -> Result<Vec<u8>, UpdateError> {
-        let (host, path) = split_https_url(url).ok_or(UpdateError::InvalidResponse)?;
-        let host = wide0(host);
-        let path = wide0(path);
-        let connection = unsafe {
-            InternetHandle::new(WinHttpConnect(
-                self.session.0,
-                PCWSTR(host.as_ptr()),
-                INTERNET_DEFAULT_HTTPS_PORT,
-                0,
-            ))?
-        };
-        let request = unsafe {
-            InternetHandle::new(WinHttpOpenRequest(
-                connection.0,
-                w!("GET"),
-                PCWSTR(path.as_ptr()),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                ptr::null(),
-                WINHTTP_FLAG_SECURE,
-            ))?
-        };
-        let headers: Vec<u16> = format!("Accept: {accept}\r\nX-GitHub-Api-Version: 2022-11-28\r\n")
-            .encode_utf16()
-            .collect();
-        unsafe {
-            WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0)?;
-            WinHttpReceiveResponse(request.0, ptr::null_mut())?;
-        }
-
-        let mut status = 0_u32;
-        let mut status_size = std::mem::size_of::<u32>() as u32;
-        let mut index = 0_u32;
-        unsafe {
-            WinHttpQueryHeaders(
-                request.0,
-                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                PCWSTR::null(),
-                Some((&mut status as *mut u32).cast()),
-                &mut status_size,
-                &mut index,
-            )?;
-        }
-        if status != 200 {
-            return Err(UpdateError::InvalidResponse);
-        }
-
-        let mut body = Vec::new();
-        loop {
-            let mut available = 0_u32;
+        let mut current_url = url.to_owned();
+        for redirect_count in 0..=MAX_REDIRECTS {
+            let (host, path) = split_https_url(&current_url).ok_or(UpdateError::InvalidResponse)?;
+            let host = wide0(host);
+            let path = wide0(path);
+            let connection = unsafe {
+                InternetHandle::new(WinHttpConnect(
+                    self.session.0,
+                    PCWSTR(host.as_ptr()),
+                    INTERNET_DEFAULT_HTTPS_PORT,
+                    0,
+                ))?
+            };
+            let request = unsafe {
+                InternetHandle::new(WinHttpOpenRequest(
+                    connection.0,
+                    w!("GET"),
+                    PCWSTR(path.as_ptr()),
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    ptr::null(),
+                    WINHTTP_FLAG_SECURE,
+                ))?
+            };
+            let redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER.to_ne_bytes();
+            let headers: Vec<u16> =
+                format!("Accept: {accept}\r\nX-GitHub-Api-Version: 2022-11-28\r\n")
+                    .encode_utf16()
+                    .collect();
             unsafe {
-                WinHttpQueryDataAvailable(request.0, &mut available)?;
+                WinHttpSetOption(
+                    Some(request.0),
+                    WINHTTP_OPTION_REDIRECT_POLICY,
+                    Some(&redirect_policy),
+                )?;
+                WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0)?;
+                WinHttpReceiveResponse(request.0, ptr::null_mut())?;
             }
-            if available == 0 {
-                break;
+
+            let status = query_numeric_header(request.0, WINHTTP_QUERY_STATUS_CODE)?;
+            if matches!(status, 301 | 302 | 303 | 307 | 308) {
+                if redirect_count == MAX_REDIRECTS {
+                    return Err(UpdateError::InvalidResponse);
+                }
+                let location = query_string_header(request.0, WINHTTP_QUERY_LOCATION)?;
+                if !is_allowed_redirect(&location) {
+                    return Err(UpdateError::InvalidResponse);
+                }
+                current_url = location;
+                continue;
             }
-            let available = available as usize;
-            if body.len().saturating_add(available) > limit {
+            if status != 200 {
                 return Err(UpdateError::InvalidResponse);
             }
-            let start = body.len();
-            body.resize(start + available, 0);
-            let mut read = 0_u32;
-            unsafe {
-                WinHttpReadData(
-                    request.0,
-                    body[start..].as_mut_ptr().cast(),
-                    available as u32,
-                    &mut read,
-                )?;
+
+            let mut body = Vec::new();
+            loop {
+                let mut available = 0_u32;
+                unsafe {
+                    WinHttpQueryDataAvailable(request.0, &mut available)?;
+                }
+                if available == 0 {
+                    break;
+                }
+                let available = available as usize;
+                if body.len().saturating_add(available) > limit {
+                    return Err(UpdateError::InvalidResponse);
+                }
+                let start = body.len();
+                body.resize(start + available, 0);
+                let mut read = 0_u32;
+                unsafe {
+                    WinHttpReadData(
+                        request.0,
+                        body[start..].as_mut_ptr().cast(),
+                        available as u32,
+                        &mut read,
+                    )?;
+                }
+                body.truncate(start + read as usize);
+                if read == 0 {
+                    break;
+                }
             }
-            body.truncate(start + read as usize);
-            if read == 0 {
-                break;
-            }
+            return Ok(body);
         }
-        Ok(body)
+        Err(UpdateError::InvalidResponse)
     }
+}
+
+fn query_numeric_header(request: *mut c_void, header: u32) -> Result<u32, UpdateError> {
+    let mut value = 0_u32;
+    let mut value_size = std::mem::size_of::<u32>() as u32;
+    let mut index = 0_u32;
+    unsafe {
+        WinHttpQueryHeaders(
+            request,
+            header | WINHTTP_QUERY_FLAG_NUMBER,
+            PCWSTR::null(),
+            Some((&mut value as *mut u32).cast()),
+            &mut value_size,
+            &mut index,
+        )?;
+    }
+    Ok(value)
+}
+
+fn query_string_header(request: *mut c_void, header: u32) -> Result<String, UpdateError> {
+    let mut buffer = [0_u16; MAX_REDIRECT_LOCATION_UNITS];
+    let mut buffer_size = std::mem::size_of_val(&buffer) as u32;
+    let mut index = 0_u32;
+    unsafe {
+        WinHttpQueryHeaders(
+            request,
+            header,
+            PCWSTR::null(),
+            Some(buffer.as_mut_ptr().cast()),
+            &mut buffer_size,
+            &mut index,
+        )?;
+    }
+    let units = (buffer_size as usize / std::mem::size_of::<u16>()).min(buffer.len());
+    let units = buffer[..units].iter().position(|unit| *unit == 0).unwrap_or(units);
+    String::from_utf16(&buffer[..units]).map_err(|_| UpdateError::InvalidResponse)
+}
+
+fn is_allowed_redirect(url: &str) -> bool {
+    split_https_url(url).is_some_and(|(host, _)| host == "release-assets.githubusercontent.com")
 }
 
 pub fn check_and_stage(updates_directory: &Path) -> Result<Option<StagedUpdate>, UpdateError> {
@@ -214,11 +271,8 @@ pub fn check_and_stage(updates_directory: &Path) -> Result<Option<StagedUpdate>,
     let executable = version_directory.join("CodexStatus.exe");
     let temporary = version_directory.join("CodexStatus.download");
 
-    let bytes = client.get(
-        &asset.browser_download_url,
-        "application/octet-stream",
-        MAX_EXECUTABLE_BYTES,
-    )?;
+    let asset_api_url = format!("{RELEASE_ASSET_API_PREFIX}{}", asset.id);
+    let bytes = client.get(&asset_api_url, "application/octet-stream", MAX_EXECUTABLE_BYTES)?;
     if bytes.len() as u64 != asset.size || bytes.len() < 64 * 1024 || !bytes.starts_with(b"MZ") {
         return Err(UpdateError::InvalidResponse);
     }
@@ -260,6 +314,7 @@ fn select_asset(
     };
     if !asset.browser_download_url.starts_with(RELEASE_ASSET_PREFIX)
         || asset.browser_download_url.contains("/../")
+        || asset.id == 0
         || asset.size == 0
         || asset.size > MAX_EXECUTABLE_BYTES as u64
     {
@@ -447,6 +502,7 @@ mod tests {
             "draft": false,
             "prerelease": false,
             "assets": [{
+                "id": 1,
                 "name": asset_channel.asset_name(version),
                 "browser_download_url": format!(
                     "https://github.com/mmm1h/codex-status/releases/download/{tag}/{}",
@@ -531,6 +587,17 @@ mod tests {
         assert!(
             select_asset(
                 &serde_json::to_vec(&traversal_url).unwrap(),
+                "0.1.2",
+                UpdateAssetChannel::Portable,
+            )
+            .is_err()
+        );
+
+        let mut missing_asset_id = base.clone();
+        missing_asset_id["assets"][0]["id"] = json!(0);
+        assert!(
+            select_asset(
+                &serde_json::to_vec(&missing_asset_id).unwrap(),
                 "0.1.2",
                 UpdateAssetChannel::Portable,
             )
@@ -637,12 +704,14 @@ mod tests {
             "prerelease": false,
             "assets": [
                 {
+                    "id": 1,
                     "name": "CodexStatus-v0.7.0-windows-x64-portable.exe",
                     "browser_download_url": "https://github.com/mmm1h/codex-status/releases/download/v0.7.0/CodexStatus-v0.7.0-windows-x64-portable.exe",
                     "size": 100_000,
                     "digest": format!("sha256:{digest}")
                 },
                 {
+                    "id": 2,
                     "name": "CodexStatus-v0.7.0-windows-x64.exe",
                     "browser_download_url": "https://github.com/mmm1h/codex-status/releases/download/v0.7.0/CodexStatus-v0.7.0-windows-x64.exe",
                     "size": 100_000,
@@ -676,6 +745,18 @@ mod tests {
     }
 
     #[test]
+    fn redirects_are_limited_to_the_official_github_release_asset_host() {
+        assert!(is_allowed_redirect(
+            "https://release-assets.githubusercontent.com/github-production-release-asset/file"
+        ));
+        assert!(!is_allowed_redirect("https://github.com/mmm1h/codex-status"));
+        assert!(!is_allowed_redirect(
+            "https://release-assets.githubusercontent.com.example.com/file"
+        ));
+        assert!(!is_allowed_redirect("http://release-assets.githubusercontent.com/file"));
+    }
+
+    #[test]
     fn hashes_bytes_as_lowercase_sha256() {
         assert_eq!(
             sha256_hex(b"CodexStatus"),
@@ -692,5 +773,23 @@ mod tests {
         let release: Release = serde_json::from_slice(&bytes).unwrap();
         assert!(release.tag_name.starts_with('v'));
         assert!(!release.draft);
+    }
+
+    #[test]
+    #[ignore = "requires downloading the latest public release asset"]
+    fn live_github_installed_asset_download_matches_release_metadata() {
+        let client = HttpClient::new().unwrap();
+        let metadata =
+            client.get(RELEASE_API, "application/vnd.github+json", MAX_METADATA_BYTES).unwrap();
+        let (version, asset, digest) =
+            select_asset(&metadata, "0.0.0", UpdateAssetChannel::Installed).unwrap().unwrap();
+        let asset_api_url = format!("{RELEASE_ASSET_API_PREFIX}{}", asset.id);
+        let bytes =
+            client.get(&asset_api_url, "application/octet-stream", MAX_EXECUTABLE_BYTES).unwrap();
+
+        assert!(parse_version(&version).is_some());
+        assert_eq!(bytes.len() as u64, asset.size);
+        assert!(bytes.starts_with(b"MZ"));
+        assert_eq!(sha256_hex(&bytes), digest);
     }
 }
