@@ -29,15 +29,19 @@ use winreg::enums::HKEY_CURRENT_USER;
 mod backdrop;
 mod composition;
 mod direct2d;
+mod shadow;
 
 pub const CARD_WIDTH: i32 = 420;
 pub const FLYOUT_CORNER_RADIUS: i32 = 20;
+pub const FLYOUT_SHADOW_MARGIN: i32 = 26;
 pub const HEADER_HEIGHT: i32 = 52;
 pub const FACTS_TOP: i32 = 304;
 pub const SURFACE_BOTTOM: i32 = 380;
 pub const FOOTER_HEIGHT: i32 = 32;
 pub const CARD_HEIGHT: i32 = SURFACE_BOTTOM + FOOTER_HEIGHT;
 const HEADER_BRAND: &str = "Codex";
+
+pub use shadow::{hide as hide_flyout_shadow, update as update_flyout_shadow};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RefreshButtonState {

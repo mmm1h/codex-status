@@ -2,6 +2,11 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.8.6] - 2026-08-13
+
+- Add an independent click-through shadow layer outside the flyout, combining a broad ambient shadow with a slightly lower contact shadow so the full glass panel stands out from light and dark desktop backgrounds.
+- Generate the shadow from the same DPI-scaled 20px rounded silhouette as the flyout, preserve the existing antialiased composition corners, keep the full shadow clear of work-area edges, and suppress the decorative layer in high-contrast mode.
+
 ## [0.8.5] - 2026-08-13
 
 - Remove the binary `SetWindowRgn` mask from the normal composition path so the shared 20px clip retains per-pixel alpha coverage and smooth antialiasing, especially against dark desktops.

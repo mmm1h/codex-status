@@ -156,15 +156,21 @@ The flyout is a fixed 420 × 412 logical-pixel native surface with exact 20px ou
 
 ## Elevation & Depth
 
-Depth comes from a live CompositionBackdropBrush Gaussian blur, one highly transparent tonal layer, a refractive optical keyline, broad Gaussian-blurred Aurora light, and a two-stage native shadow. The inner information surface floats above the sampled glass base with a wide ambient shadow plus a short contact shadow; both remain neutral and preserve desktop context.
+Depth comes from a live CompositionBackdropBrush Gaussian blur, one highly transparent tonal layer, a refractive optical keyline, broad Gaussian-blurred Aurora light, and two deliberately separate shadow systems. The inner information surface floats above the sampled glass base with a wide ambient shadow plus a short contact shadow. The entire flyout then floats above the desktop through a click-through layered shadow window: a 26px logical-pixel field combines a broad neutral ambient shadow with a slightly lower, tighter contact shadow. Light and dark themes use distinct opacity values, and high-contrast mode suppresses the decorative outer shadow. Neither shadow system may turn the glass opaque or add a hard outline.
 
 **The Black-Glass Rule.** Dark surfaces must remain visibly black; increasing translucency must never be simulated by adding a milky grey veil.
 
 ## Shapes
 
-The outer flyout uses one exact 20px composition-tree clip with antialiased alpha coverage and no normal-path custom window region or additional DWM rounding pass. The opaque GDI fallback may reproduce that geometry with a binary region because it cannot emit premultiplied composition pixels. The information surface uses 16px corners, the refresh control uses 11px corners, and the 8px capacity gauge uses a 4px full-pill radius. Borders are single-pixel optical separators and never carry the Aurora spectrum.
+The outer flyout uses one exact 20px composition-tree clip with antialiased alpha coverage and no normal-path custom window region or additional DWM rounding pass. Its independent outer shadow is generated from the same DPI-scaled 20px rounded-rectangle silhouette so the four corners remain smooth and aligned. The opaque GDI fallback may reproduce the panel geometry with a binary region because it cannot emit premultiplied composition pixels. The information surface uses 16px corners, the refresh control uses 11px corners, and the 8px capacity gauge uses a 4px full-pill radius. Borders are single-pixel optical separators and never carry the Aurora spectrum.
 
 ## Components
+
+### Flyout Shell
+
+- **Silhouette:** One 20px antialiased composition clip; the shadow layer never substitutes for or clips the visible panel.
+- **Shadow Strategy:** A transparent, non-activating outer layer uses broad ambient diffusion plus a subtly downward contact shadow, with enough screen-edge clearance to keep the full elevation visible.
+- **Accessibility:** High-contrast mode removes the decorative shadow; the shell remains legible through its system colors and boundary.
 
 ### Refresh Control
 

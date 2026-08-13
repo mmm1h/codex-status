@@ -57,17 +57,18 @@ use windows::Win32::UI::Shell::{NIN_BALLOONHIDE, NIN_BALLOONTIMEOUT, NIN_BALLOON
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_HREDRAW, CS_VREDRAW, CheckMenuRadioItem, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos,
-    GetMessageW, HMENU, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW, MB_ICONWARNING, MB_OK,
-    MESSAGEBOX_STYLE, MF_BYCOMMAND, MF_CHECKED, MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassExW,
-    RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
-    WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NULL, WM_PAINT,
-    WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
-    WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+    GetMessageW, GetWindowRect, HMENU, HTTRANSPARENT, IDC_ARROW, IsWindowVisible, KillTimer,
+    LoadCursorW, MB_ICONWARNING, MB_OK, MESSAGEBOX_STYLE, MF_BYCOMMAND, MF_CHECKED, MF_DISABLED,
+    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage,
+    RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED,
+    WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION,
+    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_NCHITTEST, WM_NULL, WM_PAINT, WM_POWERBROADCAST, WM_QUERYENDSESSION,
+    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_POPUP,
 };
 #[cfg(feature = "diagnostics")]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -83,12 +84,16 @@ const MAIN_CLASS: PCWSTR = w!("CodexStatus.MainWindow.v1");
 #[cfg(codex_status_channel = "stable")]
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.FlyoutWindow.v1");
 #[cfg(codex_status_channel = "stable")]
+const SHADOW_CLASS: PCWSTR = w!("CodexStatus.ShadowWindow.v1");
+#[cfg(codex_status_channel = "stable")]
 const TRAY_GUID: GUID = GUID::from_u128(0x7a89d848_0611_4cb4_98c9_88ca9b59ff84);
 
 #[cfg(codex_status_channel = "beta")]
 const MAIN_CLASS: PCWSTR = w!("CodexStatus.Beta.MainWindow.v1");
 #[cfg(codex_status_channel = "beta")]
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Beta.FlyoutWindow.v1");
+#[cfg(codex_status_channel = "beta")]
+const SHADOW_CLASS: PCWSTR = w!("CodexStatus.Beta.ShadowWindow.v1");
 #[cfg(codex_status_channel = "beta")]
 const TRAY_GUID: GUID = GUID::from_u128(0xcf8c5592_542f_47d2_a7b2_fa3ee023d0b3);
 
@@ -97,12 +102,16 @@ const MAIN_CLASS: PCWSTR = w!("CodexStatus.Development.MainWindow.v1");
 #[cfg(codex_status_channel = "development")]
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Development.FlyoutWindow.v1");
 #[cfg(codex_status_channel = "development")]
+const SHADOW_CLASS: PCWSTR = w!("CodexStatus.Development.ShadowWindow.v1");
+#[cfg(codex_status_channel = "development")]
 const TRAY_GUID: GUID = GUID::from_u128(0xc4f400e1_9a66_410c_8cd4_babd3aab77b1);
 
 #[cfg(codex_status_channel = "portable")]
 const MAIN_CLASS: PCWSTR = w!("CodexStatus.Portable.MainWindow.v1");
 #[cfg(codex_status_channel = "portable")]
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Portable.FlyoutWindow.v1");
+#[cfg(codex_status_channel = "portable")]
+const SHADOW_CLASS: PCWSTR = w!("CodexStatus.Portable.ShadowWindow.v1");
 
 const TRAY_ID: u32 = 1;
 
@@ -297,6 +306,7 @@ enum LaunchMode {
 
 struct AppState {
     hwnd: HWND,
+    shadow: HWND,
     flyout: HWND,
     taskbar_created: u32,
     store: AppStore,
@@ -386,6 +396,28 @@ pub fn run() -> Result<(), AppError> {
             None,
         )?
     };
+    let shadow = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(
+                WS_EX_TOOLWINDOW.0
+                    | WS_EX_TOPMOST.0
+                    | WS_EX_LAYERED.0
+                    | WS_EX_TRANSPARENT.0
+                    | WS_EX_NOACTIVATE.0,
+            ),
+            SHADOW_CLASS,
+            w!("CodexStatus shadow"),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            Some(hwnd),
+            None,
+            Some(instance),
+            None,
+        )?
+    };
     let flyout = unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0 | WS_EX_TOPMOST.0),
@@ -434,6 +466,7 @@ pub fn run() -> Result<(), AppError> {
     };
     let state = Box::new(AppState {
         hwnd,
+        shadow,
         flyout,
         taskbar_created,
         store,
@@ -475,6 +508,7 @@ pub fn run() -> Result<(), AppError> {
         "diagnostic_ready",
         serde_json::json!({
             "hwnd": unsafe { (*raw).hwnd.0 as isize },
+            "shadow": unsafe { (*raw).shadow.0 as isize },
             "flyout": unsafe { (*raw).flyout.0 as isize },
         }),
     );
@@ -582,8 +616,32 @@ fn register_classes(instance: HINSTANCE) -> windows::core::Result<()> {
         if RegisterClassExW(&flyout) == 0 {
             return Err(windows::core::Error::from_thread());
         }
+        let shadow = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            hInstance: instance,
+            lpszClassName: SHADOW_CLASS,
+            lpfnWndProc: Some(shadow_window_proc),
+            hCursor: cursor,
+            hbrBackground: HBRUSH::default(),
+            ..Default::default()
+        };
+        if RegisterClassExW(&shadow) == 0 {
+            return Err(windows::core::Error::from_thread());
+        }
     }
     Ok(())
+}
+
+unsafe extern "system" fn shadow_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == WM_NCHITTEST {
+        return LRESULT(HTTRANSPARENT as isize);
+    }
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
 unsafe extern "system" fn main_window_proc(
@@ -776,6 +834,7 @@ unsafe extern "system" fn main_window_proc(
                     // backdrop policy for every WTS session notification.
                     state.theme = ui::detect_theme(&state.settings.theme);
                     ui::configure_flyout(state.flyout, state.theme);
+                    state.refresh_flyout_shadow();
                     let _ = InvalidateRect(Some(state.flyout), None, false);
                     return LRESULT(0);
                 }
@@ -788,6 +847,7 @@ unsafe extern "system" fn main_window_proc(
                 WM_SETTINGCHANGE | WM_DISPLAYCHANGE => {
                     state.theme = ui::detect_theme(&state.settings.theme);
                     ui::configure_flyout(state.flyout, state.theme);
+                    state.refresh_flyout_shadow();
                     let _ = state.update_tray(false);
                     let _ = InvalidateRect(Some(state.flyout), None, true);
                     return LRESULT(0);
@@ -945,6 +1005,22 @@ unsafe extern "system" fn flyout_window_proc(
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
                 ui::clear_flyout_region(hwnd);
+                if !state_ptr.is_null() {
+                    let state = &mut *state_ptr;
+                    if ui::update_flyout_shadow(
+                        state.shadow,
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        GetDpiForWindow(hwnd).max(96),
+                        state.theme,
+                    )
+                    .is_err()
+                    {
+                        ui::hide_flyout_shadow(state.shadow);
+                    }
+                }
                 // The next paint releases the old back-buffer bitmap, resizes
                 // the physical-pixel swapchain, and reapplies the new D2D DPI.
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -971,6 +1047,28 @@ fn invalidate_refresh_button(hwnd: HWND, dpi: u32) {
 }
 
 impl AppState {
+    fn refresh_flyout_shadow(&self) {
+        if !unsafe { IsWindowVisible(self.flyout) }.as_bool() {
+            ui::hide_flyout_shadow(self.shadow);
+            return;
+        }
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(self.flyout, &mut rect) }.is_err()
+            || ui::update_flyout_shadow(
+                self.shadow,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                unsafe { GetDpiForWindow(self.flyout) }.max(96),
+                self.theme,
+            )
+            .is_err()
+        {
+            ui::hide_flyout_shadow(self.shadow);
+        }
+    }
+
     fn reset_status_timer(&self, delay_ms: u32) {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_STATUS);
@@ -1872,6 +1970,7 @@ impl AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
             let _ = KillTimer(Some(self.hwnd), TIMER_RENDERER_RELEASE);
+            ui::hide_flyout_shadow(self.shadow);
             let _ = ShowWindow(self.flyout, SW_HIDE);
         }
         ui::release_card_surface();
@@ -1953,18 +2052,27 @@ impl AppState {
         };
         let width = ui::scale(ui::CARD_WIDTH, dpi);
         let height = ui::scale(ui::CARD_HEIGHT, dpi);
-        let gap = ui::scale(10, dpi);
+        let shadow_margin = ui::scale(ui::FLYOUT_SHADOW_MARGIN, dpi);
+        let gap = shadow_margin;
         let mut x = point.x - width / 2;
         let mut y = anchor.top - height - gap;
         if y < info.rcWork.top {
             y = anchor.bottom + gap;
         }
-        x = x.clamp(info.rcWork.left, (info.rcWork.right - width).max(info.rcWork.left));
-        y = y.clamp(info.rcWork.top, (info.rcWork.bottom - height).max(info.rcWork.top));
+        let safe_left = info.rcWork.left + shadow_margin;
+        let safe_top = info.rcWork.top + shadow_margin;
+        let safe_right = (info.rcWork.right - width - shadow_margin).max(safe_left);
+        let safe_bottom = (info.rcWork.bottom - height - shadow_margin).max(safe_top);
+        x = x.clamp(safe_left, safe_right);
+        y = y.clamp(safe_top, safe_bottom);
         self.flyout_ignore_inactive_until = Some(Instant::now() + FLYOUT_ACTIVATION_GUARD);
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = KillTimer(Some(self.hwnd), TIMER_RENDERER_RELEASE);
+            if ui::update_flyout_shadow(self.shadow, x, y, width, height, dpi, self.theme).is_err()
+            {
+                ui::hide_flyout_shadow(self.shadow);
+            }
             let _ = SetWindowPos(self.flyout, None, x, y, width, height, SWP_SHOWWINDOW);
             ui::clear_flyout_region(self.flyout);
             let _ = SetForegroundWindow(self.flyout);
@@ -2486,6 +2594,7 @@ impl AppState {
                     if self.update_settings(|settings| settings.theme = theme) {
                         self.theme = ui::detect_theme(&self.settings.theme);
                         ui::configure_flyout(self.flyout, self.theme);
+                        self.refresh_flyout_shadow();
                         self.update_tray_after_command();
                         let _ = InvalidateRect(Some(self.flyout), None, true);
                     }
